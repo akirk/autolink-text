@@ -1,0 +1,19 @@
+# Auto Linker
+
+Auto Linker is a WordPress/Gutenberg prototype that uses the same PHP-only bot approach as Shouter to participate in Gutenberg's RTC sync stream.
+
+It watches completed paragraph events and replaces the first configured matching term with an anchor tag. The initial example setting links `Playground` to `https://playground.wordpress.net/`.
+
+The plugin has a settings page at `Settings -> Auto Linker` where a WordPress user can be selected as the bot identity and linked terms can be configured in a table with term and URL fields.
+
+The current implementation is intentionally narrow. It handles top-level paragraph completion, plain paragraph content, and the subset of Gutenberg/Yjs updateV2 payloads needed to replace a matched text range. It does not enqueue editor JavaScript and does not expose a separate public mutation endpoint.
+
+## Composer and Dist Branches
+
+`composer.json` points Composer at the upstream GitHub repository for `maxschmeling/y-php`:
+
+```sh
+composer install
+```
+
+The deployable branch should include `vendor/`, matching Shouter's dist-branch approach, so Playground can activate the plugin with Composer dependencies already present.
