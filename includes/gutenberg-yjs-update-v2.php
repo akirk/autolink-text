@@ -541,15 +541,46 @@ function gutenberg_yjs_decode_update_v2( string $update ): array {
 		$client_blocks[] = $client_block;
 	}
 
-	$delete_set_count = $decoder->rest_has_content()
-		? $decoder->read_rest_var_uint()
-		: 0;
+	$delete_set = gutenberg_yjs_read_delete_set( $decoder );
 
 	return array(
 		'client_blocks'    => $client_blocks,
 		'structs'          => $structs,
-		'delete_set_count' => $delete_set_count,
+		'delete_set'       => $delete_set,
+		'delete_set_count' => count( $delete_set ),
 	);
+}
+
+/**
+ * Reads a Yjs delete set from the remaining updateV2 payload.
+ *
+ * @return array<int,array<int,array{clock:int,length:int}>>
+ */
+function gutenberg_yjs_read_delete_set( Gutenberg_Yjs_Update_V2_Array_Decoder $decoder ): array {
+	if ( ! $decoder->rest_has_content() ) {
+		return array();
+	}
+
+	$delete_set   = array();
+	$client_count = $decoder->read_rest_var_uint();
+	for ( $client_index = 0; $client_index < $client_count; $client_index++ ) {
+		$client      = $decoder->read_rest_var_uint();
+		$range_count = $decoder->read_rest_var_uint();
+		$cursor      = 0;
+
+		for ( $range_index = 0; $range_index < $range_count; $range_index++ ) {
+			$clock  = $cursor + $decoder->read_rest_var_uint();
+			$length = $decoder->read_rest_var_uint() + 1;
+			$cursor = $clock + $length;
+
+			$delete_set[ $client ][] = array(
+				'clock'  => $clock,
+				'length' => $length,
+			);
+		}
+	}
+
+	return $delete_set;
 }
 
 /**

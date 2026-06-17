@@ -68,6 +68,7 @@ function gutenberg_rtc_empty_paragraph_document_state( int $schema_version ): ar
 		'root_content_text'   => null,
 		'text_to_block'       => array(),
 		'text_items_to_block' => array(),
+		'deleted_text_items'  => array(),
 		'processed'           => array(),
 	);
 }
@@ -378,6 +379,10 @@ function gutenberg_rtc_apply_decoded_update_to_paragraph_state( array &$state, a
 		}
 	}
 
+	foreach ( gutenberg_rtc_apply_delete_set_to_paragraph_state( $state, $decoded['delete_set'] ?? array() ) as $block_id ) {
+		$touched_blocks[ $block_id ] = true;
+	}
+
 	foreach ( array_keys( $touched_blocks ) as $block_id ) {
 		$block = $state['blocks'][ $block_id ] ?? null;
 		if (
@@ -419,6 +424,54 @@ function gutenberg_rtc_apply_decoded_update_to_paragraph_state( array &$state, a
 	}
 
 	return $events;
+}
+
+/**
+ * Applies Yjs delete ranges to known text items.
+ *
+ * @param array<string, mixed> $state      State, mutated in place.
+ * @param mixed                $delete_set Delete ranges keyed by client ID.
+ * @return array<int, string> Block IDs whose visible text changed.
+ */
+function gutenberg_rtc_apply_delete_set_to_paragraph_state( array &$state, $delete_set ): array {
+	if ( ! is_array( $delete_set ) || empty( $delete_set ) ) {
+		return array();
+	}
+
+	if ( ! isset( $state['deleted_text_items'] ) || ! is_array( $state['deleted_text_items'] ) ) {
+		$state['deleted_text_items'] = array();
+	}
+
+	$touched_blocks = array();
+	foreach ( $delete_set as $client => $ranges ) {
+		if ( ! is_array( $ranges ) ) {
+			continue;
+		}
+
+		foreach ( $ranges as $range ) {
+			if ( ! is_array( $range ) ) {
+				continue;
+			}
+
+			$start = (int) ( $range['clock'] ?? 0 );
+			$end   = $start + max( 0, (int) ( $range['length'] ?? 0 ) );
+			for ( $clock = $start; $clock < $end; $clock++ ) {
+				$deleted_key = (int) $client . ':' . $clock;
+				$state['deleted_text_items'][ $deleted_key ] = true;
+
+				$block_id = gutenberg_rtc_find_text_item_block_by_id( $state, (int) $client, $clock );
+				if ( $block_id ) {
+					$touched_blocks[ $block_id ] = true;
+				}
+			}
+		}
+	}
+
+	foreach ( array_keys( $touched_blocks ) as $block_id ) {
+		$state['blocks'][ $block_id ]['content'] = gutenberg_rtc_reconstruct_block_text_from_items( $state, $block_id );
+	}
+
+	return array_keys( $touched_blocks );
 }
 
 /**
@@ -554,6 +607,7 @@ function gutenberg_rtc_reconstruct_block_text_from_items( array $state, string $
 function gutenberg_rtc_text_nodes_for_block( array $state, string $block_id ): array {
 	$children = array();
 	$nodes    = array();
+	$deleted  = isset( $state['deleted_text_items'] ) && is_array( $state['deleted_text_items'] ) ? $state['deleted_text_items'] : array();
 
 	foreach ( $state['text_items_to_block'] as $item_key => $item ) {
 		if ( ! is_array( $item ) || (string) ( $item['block'] ?? '' ) !== $block_id || ! isset( $item['text'] ) ) {
@@ -589,6 +643,7 @@ function gutenberg_rtc_text_nodes_for_block( array $state, string $block_id ): a
 
 			$nodes[ $id_key ]      = array(
 				'id'           => $id,
+				'deleted'      => ! empty( $deleted[ $id_key ] ),
 				'right_origin' => $right_origin,
 				'text'         => $char,
 			);
@@ -622,7 +677,9 @@ function gutenberg_rtc_text_nodes_for_block( array $state, string $block_id ): a
 	$ordered = array();
 	$walk    = static function ( string $origin_key ) use ( &$walk, &$ordered, $children, $nodes ): void {
 		foreach ( $children[ $origin_key ] ?? array() as $child_key ) {
-			$ordered[] = $nodes[ $child_key ];
+			if ( empty( $nodes[ $child_key ]['deleted'] ) ) {
+				$ordered[] = $nodes[ $child_key ];
+			}
 			$walk( $child_key );
 		}
 	};
@@ -630,6 +687,26 @@ function gutenberg_rtc_text_nodes_for_block( array $state, string $block_id ): a
 	$walk( '' );
 
 	return $ordered;
+}
+
+/**
+ * Finds the block owning a text item ID.
+ */
+function gutenberg_rtc_find_text_item_block_by_id( array $state, int $client, int $clock ): ?string {
+	foreach ( $state['text_items_to_block'] as $item_key => $item ) {
+		$item_id = gutenberg_rtc_yjs_id_from_key( (string) $item_key );
+		if ( ! $item_id || (int) $item_id['client'] !== $client ) {
+			continue;
+		}
+
+		$start = (int) $item_id['clock'];
+		$end   = $start + (int) ( $item['length'] ?? 0 );
+		if ( $clock >= $start && $clock < $end ) {
+			return isset( $item['block'] ) ? (string) $item['block'] : null;
+		}
+	}
+
+	return null;
 }
 
 /**
