@@ -69,6 +69,7 @@ function gutenberg_rtc_empty_paragraph_document_state( int $schema_version ): ar
 		'text_to_block'       => array(),
 		'text_items_to_block' => array(),
 		'deleted_text_items'  => array(),
+		'pending_links'       => array(),
 		'processed'           => array(),
 	);
 }
@@ -256,24 +257,34 @@ function gutenberg_rtc_build_text_wrap( array $state, Gutenberg_RTC_Completed_Pa
 	$open_right_origin  = $nodes[ $start ]['id'];
 	$close_origin       = $nodes[ $start + $length - 1 ]['id'];
 	$close_right_origin = $nodes[ $start + $length ]['id'] ?? null;
-	$update             = gutenberg_yjs_encode_text_wrap_update_v2(
+	$wraps              = array(
+		array(
+			'opening_text'       => $opening_text,
+			'closing_text'       => $closing_text,
+			'open_origin'        => $open_origin,
+			'open_right_origin'  => $open_right_origin,
+			'open_parent'        => null,
+			'close_origin'       => $close_origin,
+			'close_right_origin' => $close_right_origin,
+			'close_parent'       => null,
+		),
+	);
+	$content_wrap       = gutenberg_rtc_build_root_content_wrap( $state, $paragraph, $start, $length, $opening_text, $closing_text );
+	if ( $content_wrap ) {
+		$wraps[] = $content_wrap;
+	}
+	$update             = gutenberg_yjs_encode_text_wraps_update_v2(
 		$client_id,
-		$opening_text,
-		$closing_text,
-		$open_origin,
-		$open_right_origin,
-		null,
-		$close_origin,
-		$close_right_origin,
-		null,
+		$wraps,
 		$start_clock
 	);
 	$opening_clock_len  = gutenberg_yjs_utf16_clock_len( $opening_text );
 	$closing_clock_len  = gutenberg_yjs_utf16_clock_len( $closing_text );
+	$total_clock_len    = count( $wraps ) * ( $opening_clock_len + $closing_clock_len );
 
 	return array(
 		'update'          => $update,
-		'clock_len'       => $opening_clock_len + $closing_clock_len,
+		'clock_len'       => $total_clock_len,
 		'selection'       => array(
 			'type'         => $cursor_type,
 			'start_item'   => $open_right_origin,
@@ -283,14 +294,58 @@ function gutenberg_rtc_build_text_wrap( array $state, Gutenberg_RTC_Completed_Pa
 		),
 		'cursor_clock'    => $start_clock + $opening_clock_len + max( 0, $length - 1 ),
 		'absoluteOffset'  => $start + $length,
-		'next_clock'      => $start_clock + $opening_clock_len + $closing_clock_len,
+		'next_clock'      => $start_clock + $total_clock_len,
 		'opening_text'    => $opening_text,
 		'closing_text'    => $closing_text,
 		'open_origin'     => $open_origin,
 		'open_right'      => $open_right_origin,
 		'close_origin'    => $close_origin,
 		'close_right'     => $close_right_origin,
+		'content_wrap'    => $content_wrap,
 		'delete_ranges'   => array(),
+	);
+}
+
+/**
+ * Builds a text-wrap descriptor for the serialized document.content Y.Text.
+ *
+ * @return array{opening_text:string,closing_text:string,open_origin:?array{client:int,clock:int},open_right_origin:?array{client:int,clock:int},open_parent:?array{client:int,clock:int},close_origin:?array{client:int,clock:int},close_right_origin:?array{client:int,clock:int},close_parent:?array{client:int,clock:int}}|null
+ */
+function gutenberg_rtc_build_root_content_wrap( array $state, Gutenberg_RTC_Completed_Paragraph $paragraph, int $start, int $length, string $opening_text, string $closing_text ): ?array {
+	$root_content      = isset( $state['root_content'] ) ? (string) $state['root_content'] : '';
+	$root_content_text = isset( $state['root_content_text'] ) && is_array( $state['root_content_text'] ) ? $state['root_content_text'] : null;
+	if ( '' === $root_content || ! $root_content_text ) {
+		return null;
+	}
+
+	if ( str_contains( $paragraph->text(), '<' ) || str_contains( $paragraph->text(), '>' ) ) {
+		return null;
+	}
+
+	$paragraph_text = esc_html( $paragraph->text() );
+	$paragraph_pos  = strpos( $root_content, '<p>' . $paragraph_text . '</p>' );
+	if ( false === $paragraph_pos ) {
+		return null;
+	}
+	$paragraph_pos += 3;
+
+	$open_offset  = (int) $paragraph_pos + $start;
+	$close_offset = $open_offset + $length;
+	$open         = gutenberg_rtc_root_content_position_to_yjs_ids( $state, $open_offset );
+	$close        = gutenberg_rtc_root_content_position_to_yjs_ids( $state, $close_offset );
+	if ( ! $open || ! $close ) {
+		return null;
+	}
+
+	return array(
+		'opening_text'       => $opening_text,
+		'closing_text'       => $closing_text,
+		'open_origin'        => $open['origin'],
+		'open_right_origin'  => $open['right_origin'],
+		'open_parent'        => ( null === $open['origin'] && null === $open['right_origin'] ) ? $root_content_text : null,
+		'close_origin'       => $close['origin'],
+		'close_right_origin' => $close['right_origin'],
+		'close_parent'       => ( null === $close['origin'] && null === $close['right_origin'] ) ? $root_content_text : null,
 	);
 }
 

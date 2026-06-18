@@ -798,48 +798,76 @@ function gutenberg_yjs_encode_text_replacement_update_v2( int $client_id, string
  * @param array{client:int,clock:int}|null $close_parent      Y.Text item ID, used only when there is no origin or right origin.
  */
 function gutenberg_yjs_encode_text_wrap_update_v2( int $client_id, string $opening_text, string $closing_text, ?array $open_origin, ?array $open_right_origin, ?array $open_parent, ?array $close_origin, ?array $close_right_origin, ?array $close_parent, int $start_clock = 0 ): string {
+	return gutenberg_yjs_encode_text_wraps_update_v2(
+		$client_id,
+		array(
+			array(
+				'opening_text'       => $opening_text,
+				'closing_text'       => $closing_text,
+				'open_origin'        => $open_origin,
+				'open_right_origin'  => $open_right_origin,
+				'open_parent'        => $open_parent,
+				'close_origin'       => $close_origin,
+				'close_right_origin' => $close_right_origin,
+				'close_parent'       => $close_parent,
+			),
+		),
+		$start_clock
+	);
+}
+
+/**
+ * Encodes a Yjs updateV2 that wraps multiple existing text ranges.
+ *
+ * @param array<int,array{opening_text:string,closing_text:string,open_origin:?array{client:int,clock:int},open_right_origin:?array{client:int,clock:int},open_parent:?array{client:int,clock:int},close_origin:?array{client:int,clock:int},close_right_origin:?array{client:int,clock:int},close_parent:?array{client:int,clock:int}}> $wraps Text wrap descriptors.
+ */
+function gutenberg_yjs_encode_text_wraps_update_v2( int $client_id, array $wraps, int $start_clock = 0 ): string {
 	$encoder = new Gutenberg_Yjs_Update_V2_Encoder();
 
 	$encoder->write_rest_var_uint( 1 ); // one client state.
-	$encoder->write_rest_var_uint( 2 ); // opening and closing string items.
+	$encoder->write_rest_var_uint( count( $wraps ) * 2 ); // opening and closing string items.
 	$encoder->write_client( $client_id );
 	$encoder->write_rest_var_uint( $start_clock );
 
-	gutenberg_yjs_write_item(
-		$encoder,
-		4,
-		$open_origin,
-		$open_right_origin,
-		$open_parent
-			? array(
-				'type'   => 'id',
-				'client' => (int) $open_parent['client'],
-				'clock'  => (int) $open_parent['clock'],
-			)
-			: null,
-		null,
-		function ( Gutenberg_Yjs_Update_V2_Encoder $encoder ) use ( $opening_text ): void {
-			$encoder->write_string( $opening_text );
-		}
-	);
+	foreach ( $wraps as $wrap ) {
+		$open_parent = $wrap['open_parent'] ?? null;
+		gutenberg_yjs_write_item(
+			$encoder,
+			4,
+			$wrap['open_origin'] ?? null,
+			$wrap['open_right_origin'] ?? null,
+			$open_parent
+				? array(
+					'type'   => 'id',
+					'client' => (int) $open_parent['client'],
+					'clock'  => (int) $open_parent['clock'],
+				)
+				: null,
+			null,
+			function ( Gutenberg_Yjs_Update_V2_Encoder $encoder ) use ( $wrap ): void {
+				$encoder->write_string( (string) $wrap['opening_text'] );
+			}
+		);
 
-	gutenberg_yjs_write_item(
-		$encoder,
-		4,
-		$close_origin,
-		$close_right_origin,
-		$close_parent
-			? array(
-				'type'   => 'id',
-				'client' => (int) $close_parent['client'],
-				'clock'  => (int) $close_parent['clock'],
-			)
-			: null,
-		null,
-		function ( Gutenberg_Yjs_Update_V2_Encoder $encoder ) use ( $closing_text ): void {
-			$encoder->write_string( $closing_text );
-		}
-	);
+		$close_parent = $wrap['close_parent'] ?? null;
+		gutenberg_yjs_write_item(
+			$encoder,
+			4,
+			$wrap['close_origin'] ?? null,
+			$wrap['close_right_origin'] ?? null,
+			$close_parent
+				? array(
+					'type'   => 'id',
+					'client' => (int) $close_parent['client'],
+					'clock'  => (int) $close_parent['clock'],
+				)
+				: null,
+			null,
+			function ( Gutenberg_Yjs_Update_V2_Encoder $encoder ) use ( $wrap ): void {
+				$encoder->write_string( (string) $wrap['closing_text'] );
+			}
+		);
+	}
 
 	$encoder->write_delete_set( array() );
 
