@@ -22,6 +22,7 @@ use Yjs\Lib0\UintOptRleDecoder;
 use Yjs\Lib0\UintOptRleEncoder;
 
 const GUTENBERG_YJS_CONTENT_STRING = 4;
+const GUTENBERG_YJS_CONTENT_DELETED = 1;
 const GUTENBERG_YJS_CONTENT_TYPE   = 7;
 const GUTENBERG_YJS_CONTENT_ANY    = 8;
 const GUTENBERG_YJS_TYPE_ARRAY     = 0;
@@ -602,6 +603,13 @@ function gutenberg_yjs_read_id( Gutenberg_Yjs_Update_V2_Array_Decoder $decoder, 
  */
 function gutenberg_yjs_decode_item_content( Gutenberg_Yjs_Update_V2_Array_Decoder $decoder, int $content_ref ): array {
 	switch ( $content_ref ) {
+		case GUTENBERG_YJS_CONTENT_DELETED:
+			$length = $decoder->read_len();
+			return array(
+				'type'   => 'deleted',
+				'length' => $length,
+			);
+
 		case GUTENBERG_YJS_CONTENT_STRING:
 			$text = $decoder->read_string();
 			return array(
