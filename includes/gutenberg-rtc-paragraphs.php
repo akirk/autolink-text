@@ -350,6 +350,52 @@ function gutenberg_rtc_build_root_content_wrap( array $state, Gutenberg_RTC_Comp
 }
 
 /**
+ * Builds a text-wrap update for the serialized document.content Y.Text.
+ */
+function gutenberg_rtc_build_root_content_text_wrap( array $state, int $start, int $length, string $opening_text, string $closing_text, int $client_id, int $start_clock ): ?array {
+	$root_content      = isset( $state['root_content'] ) ? (string) $state['root_content'] : '';
+	$root_content_text = isset( $state['root_content_text'] ) && is_array( $state['root_content_text'] ) ? $state['root_content_text'] : null;
+	if ( '' === $root_content || ! $root_content_text || $start < 0 || $length <= 0 || '' === $opening_text || '' === $closing_text ) {
+		return null;
+	}
+
+	$open_offset  = gutenberg_rtc_utf16_offset_to_byte_offset( $root_content, $start );
+	$close_offset = gutenberg_rtc_utf16_offset_to_byte_offset( $root_content, $start + $length );
+	$open         = gutenberg_rtc_root_content_position_to_yjs_ids( $state, $open_offset );
+	$close        = gutenberg_rtc_root_content_position_to_yjs_ids( $state, $close_offset );
+	if ( ! $open || ! $close ) {
+		return null;
+	}
+
+	$wraps = array(
+		array(
+			'opening_text'       => $opening_text,
+			'closing_text'       => $closing_text,
+			'open_origin'        => $open['origin'],
+			'open_right_origin'  => $open['right_origin'],
+			'open_parent'        => ( null === $open['origin'] && null === $open['right_origin'] ) ? $root_content_text : null,
+			'close_origin'       => $close['origin'],
+			'close_right_origin' => $close['right_origin'],
+			'close_parent'       => ( null === $close['origin'] && null === $close['right_origin'] ) ? $root_content_text : null,
+		),
+	);
+
+	$opening_clock_len = gutenberg_yjs_utf16_clock_len( $opening_text );
+	$closing_clock_len = gutenberg_yjs_utf16_clock_len( $closing_text );
+	$clock_len         = $opening_clock_len + $closing_clock_len;
+
+	return array(
+		'update'       => gutenberg_yjs_encode_text_wraps_update_v2( $client_id, $wraps, $start_clock ),
+		'clock_len'    => $clock_len,
+		'next_clock'   => $start_clock + $clock_len,
+		'open_origin'  => $open['origin'],
+		'open_right'   => $open['right_origin'],
+		'close_origin' => $close['origin'],
+		'close_right'  => $close['right_origin'],
+	);
+}
+
+/**
  * Finds the Y.Text type item ID for a block's content attribute.
  *
  * @return array{client:int,clock:int}|null
@@ -875,6 +921,29 @@ function gutenberg_rtc_build_content_insert_for_paragraph( array $state, string 
  */
 function gutenberg_rtc_serialize_paragraph_block( string $text ): string {
 	return "<!-- wp:paragraph -->\n<p>" . esc_html( $text ) . "</p>\n<!-- /wp:paragraph -->";
+}
+
+/**
+ * Converts a UTF-16 text offset into a UTF-8 byte offset.
+ */
+function gutenberg_rtc_utf16_offset_to_byte_offset( string $text, int $utf16_offset ): int {
+	if ( $utf16_offset <= 0 ) {
+		return 0;
+	}
+
+	$byte_offset = 0;
+	$clock       = 0;
+	foreach ( preg_split( '//u', $text, -1, PREG_SPLIT_NO_EMPTY ) ?: array() as $char ) {
+		$char_len = gutenberg_yjs_utf16_clock_len( $char );
+		if ( $clock + $char_len > $utf16_offset ) {
+			break;
+		}
+
+		$clock       += $char_len;
+		$byte_offset += strlen( $char );
+	}
+
+	return $byte_offset;
 }
 
 /**

@@ -568,6 +568,10 @@ function auto_linker_respond_to_wp_sync_requests( $response, WP_REST_Server $ser
 		}
 
 		auto_linker_set_room_state( $post_id, $state );
+		foreach ( auto_linker_emit_root_content_links( $post_id, $room, $state ) as $bot_update ) {
+			$response = auto_linker_append_bot_update_to_response( $response, $room, $bot_update );
+		}
+
 		foreach ( auto_linker_emit_pending_links( $post_id, $room, $state ) as $bot_update ) {
 			$response = auto_linker_append_bot_update_to_response( $response, $room, $bot_update );
 		}
@@ -711,6 +715,159 @@ function auto_linker_link_completed_paragraphs( int $post_id, string $room, arra
 	}
 
 	return $bot_updates;
+}
+
+/**
+ * Links matching terms in serialized document.content when Gutenberg rewrites it after a block link.
+ *
+ * @param array<string, mixed> $state State, mutated in place.
+ * @return array<int,array<string,mixed>>
+ */
+function auto_linker_emit_root_content_links( int $post_id, string $room, array &$state ): array {
+	$root_content = isset( $state['root_content'] ) ? (string) $state['root_content'] : '';
+	if ( '' === $root_content ) {
+		return array();
+	}
+
+	$match = auto_linker_find_first_unlinked_term( $root_content, auto_linker_get_terms() );
+	if ( ! $match ) {
+		return array();
+	}
+
+	$result = auto_linker_emit_root_content_term_link( $post_id, $room, $state, $match );
+	auto_linker_log(
+		'bot-rtc-root-content-link',
+		is_wp_error( $result )
+			? array(
+				'ok'      => false,
+				'room'    => $room,
+				'term'    => $match['term'],
+				'code'    => $result->get_error_code(),
+				'message' => $result->get_error_message(),
+			)
+			: array_merge( array( 'room' => $room ), $result )
+	);
+
+	return ! is_wp_error( $result ) && is_array( $result ) ? array( $result ) : array();
+}
+
+/**
+ * Emits a bot-authored term link into the serialized document.content Y.Text.
+ *
+ * @param array<string, mixed> $state State, mutated in place.
+ * @param array{term:string,url:string,matched_text:string,start:int,length:int,replacement:string,opening_text:string,closing_text:string} $match Match metadata.
+ * @return array<string, mixed>|WP_Error
+ */
+function auto_linker_emit_root_content_term_link( int $post_id, string $room, array &$state, array $match ) {
+	if ( ! $post_id || '' === $room ) {
+		return new WP_Error( 'auto_linker_missing_room', __( 'Missing Auto Linker room.', 'auto-linker' ) );
+	}
+
+	$bot_user_id = auto_linker_get_bot_user_id();
+	if ( ! $bot_user_id ) {
+		return new WP_Error( 'auto_linker_missing_bot_user', __( 'No Auto Linker bot user is configured.', 'auto-linker' ) );
+	}
+
+	$bot_user = get_user_by( 'id', $bot_user_id );
+	if ( ! $bot_user || ! user_can( $bot_user, 'edit_post', $post_id ) ) {
+		return new WP_Error( 'auto_linker_bot_cannot_edit', __( 'The configured Auto Linker bot user cannot edit this post.', 'auto-linker' ) );
+	}
+
+	$bot_client_id = auto_linker_get_bot_client_id( $bot_user_id );
+	$start_clock   = auto_linker_get_bot_clock( $post_id, $bot_client_id );
+	$link_update   = \Auto_Linker\Gutenberg_RTC\gutenberg_rtc_build_root_content_text_wrap(
+		$state,
+		(int) $match['start'],
+		(int) $match['length'],
+		(string) $match['opening_text'],
+		(string) $match['closing_text'],
+		$bot_client_id,
+		$start_clock
+	);
+	if ( ! $link_update ) {
+		return new WP_Error( 'auto_linker_no_root_content_replacement', __( 'Could not build a serialized content link.', 'auto-linker' ) );
+	}
+
+	$update           = $link_update['update'];
+	$update_data      = base64_encode( $update );
+	$previous_user_id = get_current_user_id();
+	wp_set_current_user( $bot_user_id );
+
+	$request = new WP_REST_Request( 'POST', '/wp-sync/v1/updates' );
+	$request->set_body_params(
+		array(
+			'rooms' => array(
+				array(
+					'after'     => 0,
+					'awareness' => array(
+						'collaboratorInfo' => auto_linker_build_collaborator_info( $bot_user ),
+						'editorState'      => array(
+							'selection' => array(
+								'type' => 'none',
+							),
+						),
+						'autoLinkerState'  => array(
+							'postId'      => $post_id,
+							'changedText' => (string) $match['replacement'],
+						),
+					),
+					'client_id' => $bot_client_id,
+					'room'      => $room,
+					'updates'   => array(
+						array(
+							'type' => 'update',
+							'data' => $update_data,
+						),
+					),
+				),
+			),
+		)
+	);
+
+	$response = rest_do_request( $request );
+	wp_set_current_user( $previous_user_id );
+
+	if ( $response->is_error() ) {
+		return $response->as_error();
+	}
+
+	try {
+		$decoded = \Auto_Linker\Gutenberg_RTC\gutenberg_yjs_decode_update_v2( $update );
+		\Auto_Linker\Gutenberg_RTC\gutenberg_rtc_apply_decoded_update_to_paragraph_state( $state, $decoded );
+		$state['root_content'] = auto_linker_replace_first_match( (string) ( $state['root_content'] ?? '' ), $match );
+		auto_linker_set_room_state( $post_id, $state );
+	} catch ( RuntimeException $exception ) {
+		auto_linker_log(
+			'bot-rtc-state-apply-error',
+			array(
+				'room'    => $room,
+				'message' => $exception->getMessage(),
+			)
+		);
+	}
+
+	auto_linker_set_bot_clock( $post_id, $bot_client_id, (int) $link_update['next_clock'] );
+
+	return array(
+		'ok'               => true,
+		'bot_client_id'    => $bot_client_id,
+		'start_clock'      => $start_clock,
+		'next_clock'       => (int) $link_update['next_clock'],
+		'update_bytes'     => strlen( $update ),
+		'update_data'      => $update_data,
+		'term'             => $match['term'],
+		'url'              => $match['url'],
+		'matched_text'     => $match['matched_text'],
+		'replacement'      => $match['replacement'],
+		'opening_text'     => $match['opening_text'],
+		'closing_text'     => $match['closing_text'],
+		'open_origin'      => $link_update['open_origin'],
+		'open_right'       => $link_update['open_right'],
+		'close_origin'     => $link_update['close_origin'],
+		'close_right'      => $link_update['close_right'],
+		'response_status'  => $response->get_status(),
+		'response_payload' => $response->get_data(),
+	);
 }
 
 /**
