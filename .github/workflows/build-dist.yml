@@ -87,7 +87,7 @@ jobs:
           git add blueprint.json
           git add -f vendor/
           git commit -m "Build: add vendor"
-          git push origin HEAD:${DIST_REF} --force
+          git push origin HEAD:refs/heads/${DIST_REF} --force
 
       - name: Comment with Playground link
         if: github.event_name == 'pull_request'
