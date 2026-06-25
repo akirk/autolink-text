@@ -15,7 +15,7 @@
       "step": "installPlugin",
       "pluginData": {
         "resource": "git:directory",
-        "url": "https://github.com/akirk/auto-linker",
+        "url": "https://github.com/akirk/autolink-text",
         "ref": "dist/main"
       },
       "options": {
