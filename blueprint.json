@@ -48,6 +48,7 @@
             "term": "Playground",
             "url": "https://playground.wordpress.net/",
             "color": "#3858e9",
+            "bg_color": "#f6f7f7",
             "bold": true
           }
         ]

@@ -27,6 +27,7 @@ require_once __DIR__ . '/includes/gutenberg-rtc-debug-log.php';
 
 add_action( 'admin_init', 'auto_linker_register_settings' );
 add_action( 'admin_menu', 'auto_linker_register_settings_page' );
+add_action( 'admin_enqueue_scripts', 'auto_linker_enqueue_settings_assets' );
 add_filter( 'rest_pre_dispatch', 'auto_linker_log_wp_sync_requests', 10, 3 );
 add_filter( 'rest_post_dispatch', 'auto_linker_respond_to_wp_sync_requests', 10, 3 );
 
@@ -99,6 +100,26 @@ function auto_linker_register_settings_page(): void {
 }
 
 /**
+ * Enqueues settings page assets.
+ */
+function auto_linker_enqueue_settings_assets( string $hook_suffix ): void {
+	if ( 'settings_page_autolink-text' !== $hook_suffix ) {
+		return;
+	}
+
+	wp_enqueue_style( 'wp-color-picker' );
+	wp_enqueue_script( 'wp-color-picker' );
+	wp_add_inline_style(
+		'wp-color-picker',
+		'.settings_page_autolink-text .form-table th { padding-left: 10px; }'
+	);
+	wp_add_inline_script(
+		'wp-color-picker',
+		'jQuery( function( $ ) { $( ".auto-linker-color-field" ).wpColorPicker(); } );'
+	);
+}
+
+/**
  * Renders the bot user setting.
  */
 function auto_linker_render_bot_user_field(): void {
@@ -120,18 +141,20 @@ function auto_linker_render_bot_user_field(): void {
 function auto_linker_render_terms_field(): void {
 	$terms = auto_linker_get_terms();
 	$terms[] = array(
-		'term'  => '',
-		'url'   => '',
-		'color' => '',
-		'bold'  => false,
+		'term'     => '',
+		'url'      => '',
+		'color'    => '',
+		'bg_color' => '',
+		'bold'     => false,
 	);
 	?>
-	<table class="widefat striped" style="max-width: 1100px;">
+	<table class="widefat striped" style="max-width: 1200px;">
 		<thead>
 			<tr>
 				<th scope="col"><?php esc_html_e( 'Term', 'autolink-text' ); ?></th>
 				<th scope="col"><?php esc_html_e( 'URL', 'autolink-text' ); ?></th>
 				<th scope="col"><?php esc_html_e( 'Color', 'autolink-text' ); ?></th>
+				<th scope="col"><?php esc_html_e( 'Background', 'autolink-text' ); ?></th>
 				<th scope="col"><?php esc_html_e( 'Bold', 'autolink-text' ); ?></th>
 			</tr>
 		</thead>
@@ -161,9 +184,19 @@ function auto_linker_render_terms_field(): void {
 							type="text"
 							name="<?php echo esc_attr( AUTO_LINKER_OPTION_TERMS ); ?>[<?php echo esc_attr( (string) $index ); ?>][color]"
 							value="<?php echo esc_attr( $term['color'] ?? '' ); ?>"
-							class="small-text"
+							class="auto-linker-color-field"
 							placeholder="<?php esc_attr_e( '#d63638', 'autolink-text' ); ?>"
-							pattern="#([a-fA-F0-9]{3}|[a-fA-F0-9]{6})"
+							data-default-color=""
+						/>
+					</td>
+					<td>
+						<input
+							type="text"
+							name="<?php echo esc_attr( AUTO_LINKER_OPTION_TERMS ); ?>[<?php echo esc_attr( (string) $index ); ?>][bg_color]"
+							value="<?php echo esc_attr( $term['bg_color'] ?? '' ); ?>"
+							class="auto-linker-color-field"
+							placeholder="<?php esc_attr_e( '#f6f7f7', 'autolink-text' ); ?>"
+							data-default-color=""
 						/>
 					</td>
 					<td>
@@ -181,7 +214,7 @@ function auto_linker_render_terms_field(): void {
 			<?php endforeach; ?>
 		</tbody>
 	</table>
-	<p class="description"><?php esc_html_e( 'Leave a row blank to ignore it. Colors must be hex values. Save once to add another empty row.', 'autolink-text' ); ?></p>
+	<p class="description"><?php esc_html_e( 'Leave a row blank to ignore it. Save once to add another empty row.', 'autolink-text' ); ?></p>
 	<?php
 }
 
@@ -214,7 +247,7 @@ function auto_linker_get_bot_user_id(): int {
 /**
  * Gets the configured terms.
  *
- * @return array<int,array{term:string,url:string,color:string,bold:bool}>
+ * @return array<int,array{term:string,url:string,color:string,bg_color:string,bold:bool}>
  */
 function auto_linker_get_terms(): array {
 	return auto_linker_sanitize_terms( get_option( AUTO_LINKER_OPTION_TERMS, auto_linker_default_terms() ) );
@@ -223,15 +256,16 @@ function auto_linker_get_terms(): array {
 /**
  * Gets the default linked terms.
  *
- * @return array<int,array{term:string,url:string,color:string,bold:bool}>
+ * @return array<int,array{term:string,url:string,color:string,bg_color:string,bold:bool}>
  */
 function auto_linker_default_terms(): array {
 	return array(
 		array(
-			'term'  => 'Playground',
-			'url'   => 'https://playground.wordpress.net/',
-			'color' => '',
-			'bold'  => false,
+			'term'     => 'Playground',
+			'url'      => 'https://playground.wordpress.net/',
+			'color'    => '',
+			'bg_color' => '',
+			'bold'     => false,
 		),
 	);
 }
@@ -240,7 +274,7 @@ function auto_linker_default_terms(): array {
  * Sanitizes term settings.
  *
  * @param mixed $value Posted option value.
- * @return array<int,array{term:string,url:string,color:string,bold:bool}>
+ * @return array<int,array{term:string,url:string,color:string,bg_color:string,bold:bool}>
  */
 function auto_linker_sanitize_terms( $value ): array {
 	$rows = is_string( $value ) ? auto_linker_parse_terms_text( $value ) : $value;
@@ -254,19 +288,21 @@ function auto_linker_sanitize_terms( $value ): array {
 			continue;
 		}
 
-		$term = isset( $row['term'] ) ? sanitize_text_field( (string) $row['term'] ) : '';
-		$url  = isset( $row['url'] ) ? esc_url_raw( (string) $row['url'] ) : '';
-		$color = isset( $row['color'] ) ? auto_linker_sanitize_link_color( (string) $row['color'] ) : '';
-		$bold  = ! empty( $row['bold'] );
+		$term     = isset( $row['term'] ) ? sanitize_text_field( (string) $row['term'] ) : '';
+		$url      = isset( $row['url'] ) ? esc_url_raw( (string) $row['url'] ) : '';
+		$color    = isset( $row['color'] ) ? auto_linker_sanitize_link_color( (string) $row['color'] ) : '';
+		$bg_color = isset( $row['bg_color'] ) ? auto_linker_sanitize_link_color( (string) $row['bg_color'] ) : '';
+		$bold     = ! empty( $row['bold'] );
 		if ( '' === $term || '' === $url ) {
 			continue;
 		}
 
 		$terms[] = array(
-			'term'  => $term,
-			'url'   => $url,
-			'color' => $color,
-			'bold'  => $bold,
+			'term'     => $term,
+			'url'      => $url,
+			'color'    => $color,
+			'bg_color' => $bg_color,
+			'bold'     => $bold,
 		);
 	}
 
@@ -1303,7 +1339,7 @@ function auto_linker_ydoc_find_first_link_candidate( \Yjs\YDoc $doc ): ?array {
  * Finds a linkable match for a YDoc text candidate.
  *
  * @param array{text:string,path?:string,match_mode?:string} $candidate Candidate metadata.
- * @return array{term:string,url:string,color:string,bold:bool,matched_text:string,start:int,length:int,replacement:string,opening_text:string,closing_text:string}|null
+ * @return array{term:string,url:string,color:string,bg_color:string,bold:bool,matched_text:string,start:int,length:int,replacement:string,opening_text:string,closing_text:string}|null
  */
 function auto_linker_ydoc_candidate_match( array $candidate ): ?array {
 	$text       = (string) ( $candidate['text'] ?? '' );
@@ -1480,8 +1516,8 @@ function auto_linker_append_bot_update_to_response( $response, string $room, arr
 /**
  * Finds the first configured term that is not already inside markup.
  *
- * @param array<int,array{term:string,url:string,color?:string,bold?:bool}> $terms Terms.
- * @return array{term:string,url:string,color:string,bold:bool,matched_text:string,start:int,length:int,replacement:string,opening_text:string,closing_text:string}|null
+ * @param array<int,array{term:string,url:string,color?:string,bg_color?:string,bold?:bool}> $terms Terms.
+ * @return array{term:string,url:string,color:string,bg_color:string,bold:bool,matched_text:string,start:int,length:int,replacement:string,opening_text:string,closing_text:string}|null
  */
 function auto_linker_find_first_unlinked_term( string $text, array $terms ): ?array {
 	if ( ! auto_linker_has_balanced_anchor_markup( $text ) ) {
@@ -1492,6 +1528,7 @@ function auto_linker_find_first_unlinked_term( string $text, array $terms ): ?ar
 		$label = (string) ( $term['term'] ?? '' );
 		$url   = (string) ( $term['url'] ?? '' );
 		$color = auto_linker_sanitize_link_color( (string) ( $term['color'] ?? '' ) );
+		$bg_color = auto_linker_sanitize_link_color( (string) ( $term['bg_color'] ?? '' ) );
 		$bold  = ! empty( $term['bold'] );
 		if ( '' === $label || '' === $url ) {
 			continue;
@@ -1513,12 +1550,13 @@ function auto_linker_find_first_unlinked_term( string $text, array $terms ): ?ar
 				'term'         => $label,
 				'url'          => $url,
 				'color'        => $color,
+				'bg_color'     => $bg_color,
 				'bold'         => $bold,
 				'matched_text' => $matched_text,
 				'start'        => \Auto_Linker\Gutenberg_RTC\gutenberg_yjs_utf16_clock_len( substr( $text, 0, $byte_offset ) ),
 				'length'       => \Auto_Linker\Gutenberg_RTC\gutenberg_yjs_utf16_clock_len( $matched_text ),
-				'replacement'  => auto_linker_build_anchor_html( $matched_text, $url, $color, $bold ),
-				'opening_text' => auto_linker_build_opening_anchor_html( $url, $color, $bold ),
+				'replacement'  => auto_linker_build_anchor_html( $matched_text, $url, $color, $bg_color, $bold ),
+				'opening_text' => auto_linker_build_opening_anchor_html( $url, $color, $bg_color, $bold ),
 				'closing_text' => '</a>',
 			);
 		}
@@ -1530,8 +1568,8 @@ function auto_linker_find_first_unlinked_term( string $text, array $terms ): ?ar
 /**
  * Finds a configured term inside serialized paragraph HTML.
  *
- * @param array<int,array{term:string,url:string,color?:string,bold?:bool}> $terms Terms.
- * @return array{term:string,url:string,color:string,bold:bool,matched_text:string,start:int,length:int,replacement:string,opening_text:string,closing_text:string}|null
+ * @param array<int,array{term:string,url:string,color?:string,bg_color?:string,bold?:bool}> $terms Terms.
+ * @return array{term:string,url:string,color:string,bg_color:string,bold:bool,matched_text:string,start:int,length:int,replacement:string,opening_text:string,closing_text:string}|null
  */
 function auto_linker_find_first_serialized_paragraph_term( string $text, array $terms ): ?array {
 	if ( ! preg_match_all( '/<p\b[^>]*>(.*?)<\/p>/is', $text, $paragraphs, PREG_OFFSET_CAPTURE ) ) {
@@ -1587,15 +1625,15 @@ function auto_linker_offset_is_inside_markup( string $text, int $byte_offset ): 
 /**
  * Builds the anchor markup inserted into paragraph content.
  */
-function auto_linker_build_anchor_html( string $label, string $url, string $color = '', bool $bold = false ): string {
-	return auto_linker_build_opening_anchor_html( $url, $color, $bold ) . esc_html( $label ) . '</a>';
+function auto_linker_build_anchor_html( string $label, string $url, string $color = '', string $bg_color = '', bool $bold = false ): string {
+	return auto_linker_build_opening_anchor_html( $url, $color, $bg_color, $bold ) . esc_html( $label ) . '</a>';
 }
 
 /**
  * Builds the opening anchor tag inserted before linked text.
  */
-function auto_linker_build_opening_anchor_html( string $url, string $color = '', bool $bold = false ): string {
-	$style = auto_linker_build_link_style( $color, $bold );
+function auto_linker_build_opening_anchor_html( string $url, string $color = '', string $bg_color = '', bool $bold = false ): string {
+	$style = auto_linker_build_link_style( $color, $bg_color, $bold );
 
 	return '<a href="' . esc_url( $url ) . '"' . ( '' === $style ? '' : ' style="' . esc_attr( $style ) . '"' ) . '>';
 }
@@ -1603,12 +1641,17 @@ function auto_linker_build_opening_anchor_html( string $url, string $color = '',
 /**
  * Builds a constrained inline style string for generated links.
  */
-function auto_linker_build_link_style( string $color, bool $bold ): string {
-	$styles = array();
-	$color  = auto_linker_sanitize_link_color( $color );
+function auto_linker_build_link_style( string $color, string $bg_color, bool $bold ): string {
+	$styles   = array();
+	$color    = auto_linker_sanitize_link_color( $color );
+	$bg_color = auto_linker_sanitize_link_color( $bg_color );
 
 	if ( '' !== $color ) {
 		$styles[] = 'color: ' . $color . ';';
+	}
+
+	if ( '' !== $bg_color ) {
+		$styles[] = 'background-color: ' . $bg_color . ';';
 	}
 
 	if ( $bold ) {

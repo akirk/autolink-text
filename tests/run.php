@@ -10,6 +10,10 @@ function register_setting( ...$args ): void {}
 function add_settings_section( ...$args ): void {}
 function add_settings_field( ...$args ): void {}
 function add_options_page( ...$args ): void {}
+function wp_enqueue_style( ...$args ): void {}
+function wp_enqueue_script( ...$args ): void {}
+function wp_add_inline_style( ...$args ): void {}
+function wp_add_inline_script( ...$args ): void {}
 function __( string $text, string $domain = 'default' ): string {
 	return $text;
 }
@@ -78,6 +82,7 @@ function auto_linker_test_styled_terms(): array {
 			'term'  => 'Playground',
 			'url'   => 'https://playground.wordpress.net/',
 			'color' => '#D63638',
+			'bg_color' => '#F6F7F7',
 			'bold'  => true,
 		),
 	);
@@ -187,8 +192,8 @@ $tests = array(
 		$match = auto_linker_find_first_unlinked_term( 'Hello Playground!', auto_linker_test_styled_terms() );
 
 		auto_linker_test_assert( is_array( $match ), 'Expected styled Playground to match.' );
-		auto_linker_test_assert( '<a href="https://playground.wordpress.net/" style="color: #d63638; font-weight: 700;">Playground</a>' === $match['replacement'], 'Expected color and bold styles on replacement anchor.' );
-		auto_linker_test_assert( '<a href="https://playground.wordpress.net/" style="color: #d63638; font-weight: 700;">' === $match['opening_text'], 'Expected color and bold styles on opening anchor.' );
+		auto_linker_test_assert( '<a href="https://playground.wordpress.net/" style="color: #d63638; background-color: #f6f7f7; font-weight: 700;">Playground</a>' === $match['replacement'], 'Expected color, background color, and bold styles on replacement anchor.' );
+		auto_linker_test_assert( '<a href="https://playground.wordpress.net/" style="color: #d63638; background-color: #f6f7f7; font-weight: 700;">' === $match['opening_text'], 'Expected color, background color, and bold styles on opening anchor.' );
 	},
 
 	'sanitizes configured link styles' => static function (): void {
@@ -198,20 +203,24 @@ $tests = array(
 					'term'  => 'Playground',
 					'url'   => 'https://playground.wordpress.net/',
 					'color' => 'not-css; color: red',
+					'bg_color' => 'also-not-css',
 					'bold'  => '1',
 				),
 				array(
 					'term'  => 'WordPress',
 					'url'   => 'https://wordpress.org/',
 					'color' => '3858e9',
+					'bg_color' => '#f6f7f7',
 					'bold'  => '',
 				),
 			)
 		);
 
 		auto_linker_test_assert( '' === $terms[0]['color'], 'Expected invalid color to be dropped.' );
+		auto_linker_test_assert( '' === $terms[0]['bg_color'], 'Expected invalid background color to be dropped.' );
 		auto_linker_test_assert( true === $terms[0]['bold'], 'Expected truthy bold setting to be preserved.' );
 		auto_linker_test_assert( '#3858e9' === $terms[1]['color'], 'Expected hex color without leading hash to be normalized.' );
+		auto_linker_test_assert( '#f6f7f7' === $terms[1]['bg_color'], 'Expected background color to be preserved.' );
 		auto_linker_test_assert( false === $terms[1]['bold'], 'Expected empty bold setting to become false.' );
 	},
 
