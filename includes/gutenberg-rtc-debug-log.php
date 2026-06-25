@@ -316,6 +316,32 @@ function gutenberg_rtc_summarize_decoded_yjs_update( array $decoded ): array {
 }
 
 /**
+ * Formats a Yjs ID as "client:clock" for log output.
+ *
+ * @param mixed $id Yjs ID array.
+ */
+function gutenberg_rtc_yjs_id_key( $id ): string {
+	if ( ! is_array( $id ) || ! isset( $id['client'], $id['clock'] ) ) {
+		return '';
+	}
+
+	return (int) $id['client'] . ':' . (int) $id['clock'];
+}
+
+/**
+ * Formats a decoded Yjs parent reference for log output.
+ *
+ * @param mixed $parent Yjs parent reference.
+ */
+function gutenberg_rtc_yjs_parent_key( $parent ): string {
+	if ( is_string( $parent ) ) {
+		return $parent;
+	}
+
+	return gutenberg_rtc_yjs_id_key( $parent );
+}
+
+/**
  * Tiny lib0-style binary reader for probe logging.
  */
 class Gutenberg_RTC_Debug_Update_Reader {

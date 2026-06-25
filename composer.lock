@@ -4,20 +4,20 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "f56c11a706bcb29461c4de997e4f706d",
+    "content-hash": "7545ff228bfb618933142546d65ae423",
     "packages": [
         {
             "name": "maxschmeling/y-php",
-            "version": "dev-main",
+            "version": "dev-improve-ydoc-struct-lookups",
             "source": {
                 "type": "git",
-                "url": "https://github.com/maxschmeling/y-php.git",
-                "reference": "4515ef1f427d050f070430cf8ff1a5f1355731aa"
+                "url": "https://github.com/akirk/y-php.git",
+                "reference": "e5b3e9b2995493474f07c9f0b1524218a9d1041c"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/maxschmeling/y-php/zipball/4515ef1f427d050f070430cf8ff1a5f1355731aa",
-                "reference": "4515ef1f427d050f070430cf8ff1a5f1355731aa",
+                "url": "https://api.github.com/repos/akirk/y-php/zipball/e5b3e9b2995493474f07c9f0b1524218a9d1041c",
+                "reference": "e5b3e9b2995493474f07c9f0b1524218a9d1041c",
                 "shasum": ""
             },
             "require": {
@@ -26,7 +26,6 @@
             "require-dev": {
                 "phpunit/phpunit": "^10.5"
             },
-            "default-branch": true,
             "type": "library",
             "autoload": {
                 "psr-4": {
@@ -51,10 +50,9 @@
             ],
             "description": "Fresh PHP implementation of Yjs-compatible CRDT primitives targeting binary compatibility with Yjs 13.",
             "support": {
-                "source": "https://github.com/maxschmeling/y-php/tree/main",
-                "issues": "https://github.com/maxschmeling/y-php/issues"
+                "source": "https://github.com/akirk/y-php/tree/improve-ydoc-struct-lookups"
             },
-            "time": "2026-06-13T16:14:02+00:00"
+            "time": "2026-06-24T09:46:09+00:00"
         }
     ],
     "packages-dev": [],

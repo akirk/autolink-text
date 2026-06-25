@@ -6,6 +6,8 @@ It watches completed paragraph events and replaces the first configured matching
 
 The plugin has a settings page at `Settings -> Auto Linker` where a WordPress user can be selected as the bot identity and linked terms can be configured in a table with term and URL fields.
 
+[Open Auto Linker in WordPress Playground](https://playground.wordpress.net/?blueprint-url=https://raw.githubusercontent.com/akirk/auto-linker/refs/heads/main/blueprint.json).
+
 The current implementation is intentionally narrow. It handles top-level paragraph completion, plain paragraph content, and the subset of Gutenberg/Yjs updateV2 payloads needed to replace a matched text range. It does not enqueue editor JavaScript and does not expose a separate public mutation endpoint.
 
 ## Composer and Dist Branches
@@ -16,4 +18,4 @@ The current implementation is intentionally narrow. It handles top-level paragra
 composer install
 ```
 
-The deployable branch should include `vendor/`, matching Shouter's dist-branch approach, so Playground can activate the plugin with Composer dependencies already present.
+The repository ignores `vendor/`; install Composer dependencies locally before running the plugin or tests.

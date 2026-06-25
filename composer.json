@@ -6,12 +6,15 @@
 	"repositories": [
 		{
 			"type": "vcs",
-			"url": "https://github.com/maxschmeling/y-php"
+			"url": "https://github.com/akirk/y-php"
 		}
 	],
 	"require": {
 		"php": ">=8.1",
-		"maxschmeling/y-php": "dev-main"
+		"maxschmeling/y-php": "dev-improve-ydoc-struct-lookups"
+	},
+	"scripts": {
+		"test": "php tests/run.php"
 	},
 	"minimum-stability": "dev",
 	"prefer-stable": true

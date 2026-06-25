@@ -16,14 +16,13 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 const AUTO_LINKER_OPTION_BOT_USER_ID = 'auto_linker_bot_user_id';
 const AUTO_LINKER_OPTION_TERMS = 'auto_linker_terms';
-const AUTO_LINKER_BOT_CLOCK_META_KEY = '_auto_linker_bot_clock';
 const AUTO_LINKER_ROOM_STATE_META_KEY = '_auto_linker_room_state';
-const AUTO_LINKER_AWARENESS_NUDGE_TTL = 20;
-const AUTO_LINKER_ROOM_STATE_SCHEMA_VERSION = 3;
+const AUTO_LINKER_ROOM_STATE_SCHEMA_VERSION = 9;
+const AUTO_LINKER_MAX_YDOC_STATE_BYTES = 524288;
+const AUTO_LINKER_MAX_YDOC_STATE_BASE64_LENGTH = 699052;
 
 require_once __DIR__ . '/vendor/autoload.php';
 require_once __DIR__ . '/includes/gutenberg-yjs-update-v2.php';
-require_once __DIR__ . '/includes/gutenberg-rtc-paragraphs.php';
 require_once __DIR__ . '/includes/gutenberg-rtc-debug-log.php';
 
 add_action( 'admin_init', 'auto_linker_register_settings' );
@@ -297,27 +296,16 @@ function auto_linker_emit_bot_awareness( int $post_id, string $room, string $cha
 		return new WP_Error( 'auto_linker_bot_cannot_edit', __( 'The configured Auto Linker bot user cannot edit this post.', 'auto-linker' ) );
 	}
 
-		$previous_user_id = get_current_user_id();
-		wp_set_current_user( $bot_user_id );
+	$previous_user_id = get_current_user_id();
+	wp_set_current_user( $bot_user_id );
 
-		$request = new WP_REST_Request( 'POST', '/wp-sync/v1/updates' );
+	$request = new WP_REST_Request( 'POST', '/wp-sync/v1/updates' );
 	$request->set_body_params(
 		array(
 			'rooms' => array(
 				array(
 					'after'     => 0,
-					'awareness' => array(
-						'collaboratorInfo' => auto_linker_build_collaborator_info( $bot_user ),
-						'editorState'      => array(
-							'selection' => array(
-								'type' => 'none',
-							),
-						),
-						'autoLinkerState'  => array(
-							'postId'      => $post_id,
-							'changedText' => $changed_text,
-						),
-					),
+					'awareness' => auto_linker_build_bot_awareness_state( $bot_user, $post_id, $changed_text ),
 					'client_id' => auto_linker_get_bot_client_id( $bot_user_id ),
 					'room'      => $room,
 					'updates'   => array(),
@@ -431,12 +419,20 @@ function auto_linker_maybe_emit_bot_awareness_nudge( int $post_id, string $room,
 		return;
 	}
 
-	$transient_key = 'auto_linker_awareness_nudge_' . md5( $room );
-	if ( get_transient( $transient_key ) ) {
+	$state = auto_linker_get_room_state( $post_id );
+	if ( time() < (int) ( $state['selection_until'] ?? 0 ) ) {
+		auto_linker_log(
+			'bot-rtc-awareness-nudge-skip',
+			array(
+				'room'          => $room,
+				'post_id'       => $post_id,
+				'client_id'     => $client_id,
+				'bot_client_id' => $bot_client_id,
+				'reason'        => 'post_link_selection_active',
+			)
+		);
 		return;
 	}
-
-	set_transient( $transient_key, time(), AUTO_LINKER_AWARENESS_NUDGE_TTL );
 
 	$result = auto_linker_emit_bot_awareness( $post_id, $room, '' );
 	auto_linker_log(
@@ -549,39 +545,841 @@ function auto_linker_respond_to_wp_sync_requests( $response, WP_REST_Server $ser
 			continue;
 		}
 
-		$state      = auto_linker_get_room_state( $post_id );
-		$paragraphs = array();
-		if ( ! empty( $updates ) ) {
-			$paragraphs = \Auto_Linker\Gutenberg_RTC\gutenberg_rtc_apply_paragraph_updates(
-				$state,
-				$updates,
-				static function ( RuntimeException $exception ) use ( $room ): void {
-					auto_linker_log(
-						'bot-rtc-decode-error',
-						array(
-							'room'    => $room,
-							'message' => $exception->getMessage(),
-						)
-					);
-				}
-			);
-		}
+		$updates_to_apply = array_merge(
+			auto_linker_response_updates_for_room( $response, $room ),
+			$updates
+		);
 
-		auto_linker_set_room_state( $post_id, $state );
-		foreach ( auto_linker_emit_root_content_links( $post_id, $room, $state ) as $bot_update ) {
-			$response = auto_linker_append_bot_update_to_response( $response, $room, $bot_update );
-		}
-
-		foreach ( auto_linker_emit_pending_links( $post_id, $room, $state ) as $bot_update ) {
-			$response = auto_linker_append_bot_update_to_response( $response, $room, $bot_update );
-		}
-
-		foreach ( auto_linker_link_completed_paragraphs( $post_id, $room, $state, $paragraphs ) as $bot_update ) {
+		foreach ( auto_linker_ydoc_handle_room_updates( $post_id, $room, $updates_to_apply, $room_request ) as $bot_update ) {
 			$response = auto_linker_append_bot_update_to_response( $response, $room, $bot_update );
 		}
 	}
 
 	return $response;
+}
+
+/**
+ * Extracts server-returned sync updates for a room from the current REST response.
+ *
+ * @return array<int,array<string,mixed>>
+ */
+function auto_linker_response_updates_for_room( $response, string $room ): array {
+	if ( ! $response instanceof WP_REST_Response ) {
+		return array();
+	}
+
+	$data = $response->get_data();
+	if ( ! is_array( $data ) || empty( $data['rooms'] ) || ! is_array( $data['rooms'] ) ) {
+		return array();
+	}
+
+	foreach ( $data['rooms'] as $room_response ) {
+		if ( is_array( $room_response ) && (string) ( $room_response['room'] ?? '' ) === $room && isset( $room_response['updates'] ) && is_array( $room_response['updates'] ) ) {
+			return $room_response['updates'];
+		}
+	}
+
+	return array();
+}
+
+/**
+ * Applies room updates to a real YDoc and emits at most one bot-authored link update.
+ *
+ * @param array<int,array<string,mixed>> $updates      Incoming sync updates.
+ * @param array<string,mixed>            $room_request Current sync room request.
+ * @return array<int,array<string,mixed>>
+ */
+function auto_linker_ydoc_handle_room_updates( int $post_id, string $room, array $updates, array $room_request = array() ): array {
+	$state = auto_linker_get_room_state( $post_id );
+	$doc   = auto_linker_ydoc_from_state( $post_id, $state );
+	if ( array() === $doc->toJSON() ) {
+		$bootstrap_updates = auto_linker_fetch_room_snapshot_updates( $post_id, $room );
+		if ( $bootstrap_updates ) {
+			$updates = array_merge( $bootstrap_updates, $updates );
+		}
+	}
+
+	foreach ( $updates as $update ) {
+		auto_linker_ydoc_apply_room_update( $doc, $update, $room );
+	}
+
+	$bot_updates = array();
+	$bot_update  = auto_linker_ydoc_emit_first_link( $post_id, $room, $doc, $state, $room_request );
+	if ( is_array( $bot_update ) ) {
+		$bot_updates[] = $bot_update;
+	}
+
+	$state_update = $doc->encodeStateAsUpdateV2();
+	if ( strlen( $state_update ) > AUTO_LINKER_MAX_YDOC_STATE_BYTES ) {
+		auto_linker_log(
+			'bot-rtc-ydoc-state-reset',
+			array(
+				'post_id' => $post_id,
+				'room'    => $room,
+				'reason'  => 'encoded_state_too_large',
+				'bytes'   => strlen( $state_update ),
+			)
+		);
+		$state['ydoc_update_v2'] = '';
+		$state['pending_link']   = null;
+		$state['selection_until'] = 0;
+	} else {
+		$state['ydoc_update_v2'] = base64_encode( $state_update );
+	}
+	auto_linker_set_room_state( $post_id, $state );
+
+	return $bot_updates;
+}
+
+/**
+ * Applies one Gutenberg RTC room update entry to a YDoc.
+ *
+ * @param mixed $update Update entry.
+ */
+function auto_linker_ydoc_apply_room_update( \Yjs\YDoc $doc, $update, string $room ): void {
+	if ( ! is_array( $update ) || empty( $update['data'] ) || ! is_string( $update['data'] ) ) {
+		return;
+	}
+
+	$type  = isset( $update['type'] ) && is_string( $update['type'] ) ? $update['type'] : '';
+	$bytes = base64_decode( $update['data'], true );
+	if ( false === $bytes ) {
+		auto_linker_log(
+			'bot-rtc-ydoc-apply-error',
+			array(
+				'room'    => $room,
+				'type'    => $type,
+				'message' => 'Invalid base64 update payload.',
+			)
+		);
+		return;
+	}
+
+	try {
+		if ( 'update' === $type || 'compaction' === $type ) {
+			$doc->applyUpdateV2( $bytes, 'remote' );
+			return;
+		}
+
+		if ( 'sync_step2' === $type ) {
+			\Yjs\Sync\SyncProtocol::applySyncStep2V2( $doc, $bytes, 'remote' );
+			return;
+		}
+	} catch ( Throwable $exception ) {
+		auto_linker_log(
+			'bot-rtc-ydoc-apply-error',
+			array(
+				'room'    => $room,
+				'type'    => $type,
+				'message' => $exception->getMessage(),
+			)
+		);
+	}
+}
+
+/**
+ * Builds a YDoc from the persisted full-state update.
+ */
+function auto_linker_ydoc_from_state( int $post_id, array $state ): \Yjs\YDoc {
+	$bot_user_id   = auto_linker_get_bot_user_id();
+	$bot_client_id = $bot_user_id ? auto_linker_get_bot_client_id( $bot_user_id ) : null;
+	$doc           = new \Yjs\YDoc( $bot_client_id ?: null );
+	$encoded       = isset( $state['ydoc_update_v2'] ) && is_string( $state['ydoc_update_v2'] ) ? $state['ydoc_update_v2'] : '';
+
+	if ( '' !== $encoded ) {
+		if ( strlen( $encoded ) > AUTO_LINKER_MAX_YDOC_STATE_BASE64_LENGTH ) {
+			auto_linker_log(
+				'bot-rtc-ydoc-state-reset',
+				array(
+					'post_id'       => $post_id,
+					'reason'        => 'persisted_state_base64_too_large',
+					'base64_length' => strlen( $encoded ),
+				)
+			);
+			return $doc;
+		}
+
+		$bytes = base64_decode( $encoded, true );
+		if ( false !== $bytes ) {
+			if ( strlen( $bytes ) > AUTO_LINKER_MAX_YDOC_STATE_BYTES ) {
+				auto_linker_log(
+					'bot-rtc-ydoc-state-reset',
+					array(
+						'post_id' => $post_id,
+						'reason'  => 'persisted_state_too_large',
+						'bytes'   => strlen( $bytes ),
+					)
+				);
+				return $doc;
+			}
+
+			try {
+				$doc->applyUpdateV2( $bytes, 'persisted' );
+			} catch ( Throwable $exception ) {
+				auto_linker_log(
+					'bot-rtc-ydoc-state-error',
+					array(
+						'post_id' => $post_id,
+						'message' => $exception->getMessage(),
+					)
+				);
+				$doc = new \Yjs\YDoc( $bot_client_id ?: null );
+			}
+		}
+	}
+
+	return $doc;
+}
+
+/**
+ * Fetches a full room snapshot from the sync endpoint when no persisted YDoc state exists.
+ *
+ * @return array<int,array<string,mixed>>
+ */
+function auto_linker_fetch_room_snapshot_updates( int $post_id, string $room ): array {
+	$bot_user_id = auto_linker_get_bot_user_id();
+	if ( ! $bot_user_id || '' === $room ) {
+		return array();
+	}
+
+	$bot_user = get_user_by( 'id', $bot_user_id );
+	if ( ! $bot_user || ! user_can( $bot_user, 'edit_post', $post_id ) ) {
+		return array();
+	}
+
+	$previous_user_id = get_current_user_id();
+	wp_set_current_user( $bot_user_id );
+
+	$request = new WP_REST_Request( 'POST', '/wp-sync/v1/updates' );
+	$request->set_body_params(
+		array(
+			'rooms' => array(
+				array(
+					'after'     => 0,
+					'awareness' => auto_linker_build_bot_awareness_state( $bot_user, $post_id, '' ),
+					'client_id' => auto_linker_get_bot_client_id( $bot_user_id ),
+					'room'      => $room,
+					'updates'   => array(),
+				),
+			),
+		)
+	);
+
+	$response = rest_do_request( $request );
+	wp_set_current_user( $previous_user_id );
+
+	if ( $response->is_error() ) {
+		auto_linker_log(
+			'bot-rtc-ydoc-bootstrap',
+			array(
+				'ok'      => false,
+				'room'    => $room,
+				'code'    => $response->as_error()->get_error_code(),
+				'message' => $response->as_error()->get_error_message(),
+			)
+		);
+		return array();
+	}
+
+	$updates = auto_linker_response_updates_for_room( $response, $room );
+	auto_linker_log(
+		'bot-rtc-ydoc-bootstrap',
+		array(
+			'ok'           => true,
+			'room'         => $room,
+			'update_count' => count( $updates ),
+			'status'       => $response->get_status(),
+		)
+	);
+
+	return $updates;
+}
+
+/**
+ * Mutates the first linkable term as the bot, then selects the linked word.
+ *
+ * @return array<string,mixed>|null
+ */
+function auto_linker_ydoc_emit_first_link( int $post_id, string $room, \Yjs\YDoc $doc, array &$state, array $room_request = array() ): ?array {
+	if ( ! $post_id || '' === $room ) {
+		return null;
+	}
+
+	$bot_user_id = auto_linker_get_bot_user_id();
+	if ( ! $bot_user_id ) {
+		return null;
+	}
+
+	$bot_user = get_user_by( 'id', $bot_user_id );
+	if ( ! $bot_user || ! user_can( $bot_user, 'edit_post', $post_id ) ) {
+		auto_linker_log(
+			'bot-rtc-ydoc-skip',
+			array(
+				'room'   => $room,
+				'reason' => 'bot_cannot_edit',
+			)
+		);
+		return null;
+	}
+
+	if ( ! empty( $state['pending_link'] ) ) {
+		unset( $state['pending_link'] );
+	}
+
+	$candidate = auto_linker_ydoc_find_awareness_link_candidate( $doc, $room_request );
+	if ( $candidate && ! auto_linker_ydoc_candidate_match( $candidate ) ) {
+		auto_linker_log(
+			'bot-rtc-ydoc-candidate-skip',
+			array_merge(
+				array(
+					'room'   => $room,
+					'path'   => $candidate['path'],
+					'reason' => 'awareness_candidate_has_no_linkable_term',
+					'text'   => $candidate['text'],
+				),
+				auto_linker_ydoc_link_candidate_diagnostics( $doc, $room_request )
+			)
+		);
+		$candidate = null;
+	}
+
+	$candidate = $candidate ?? auto_linker_ydoc_find_first_link_candidate( $doc );
+	if ( ! $candidate ) {
+		auto_linker_log(
+			'bot-rtc-ydoc-skip',
+			array_merge(
+				array(
+					'room'   => $room,
+					'reason' => 'no_link_candidate',
+				),
+				auto_linker_ydoc_link_candidate_diagnostics( $doc, $room_request )
+			)
+		);
+		return null;
+	}
+
+	$text  = $candidate['text'];
+	$match = auto_linker_ydoc_candidate_match( $candidate );
+	auto_linker_log(
+		'bot-rtc-ydoc-candidate',
+		array(
+			'room' => $room,
+			'path' => $candidate['path'],
+			'text' => $text,
+		)
+	);
+	if ( ! $match ) {
+		return null;
+	}
+
+	return auto_linker_ydoc_apply_link_candidate( $post_id, $room, $doc, $bot_user, $candidate, $state );
+}
+
+/**
+ * Applies a link to the current first matching term in a candidate text.
+ *
+ * @param array{text_type:\Yjs\YNestedText,text:string,path:string,match_mode?:string} $candidate Link candidate.
+ * @return array<string,mixed>|null
+ */
+function auto_linker_ydoc_apply_link_candidate( int $post_id, string $room, \Yjs\YDoc $doc, WP_User $bot_user, array $candidate, array &$state ): ?array {
+	$text  = $candidate['text_type']->toString();
+	$candidate['text'] = $text;
+	$match = auto_linker_ydoc_candidate_match( $candidate );
+	if ( ! $match ) {
+		auto_linker_log(
+			'bot-rtc-ydoc-link',
+			array(
+				'ok'      => false,
+				'room'    => $room,
+				'path'    => $candidate['path'],
+				'message' => 'No matching term remained after highlight.',
+			)
+		);
+		return null;
+	}
+
+	$captured_update = null;
+	$observer_id     = $doc->observeUpdateV2(
+		static function ( string $update, \Yjs\YDoc $observed_doc, mixed $origin ) use ( &$captured_update ): void {
+			unset( $observed_doc );
+			if ( 'auto-linker' === $origin ) {
+				$captured_update = $update;
+			}
+		}
+	);
+
+	$ytext = $candidate['text_type'];
+	$doc->transact(
+		static function () use ( $ytext, $match ): void {
+			$start  = (int) $match['start'];
+			$length = (int) $match['length'];
+			$ytext->insert( $start + $length, (string) $match['closing_text'] );
+			$ytext->insert( $start, (string) $match['opening_text'] );
+		},
+		'auto-linker'
+	);
+	$doc->unobserveUpdateV2( $observer_id );
+
+	if ( null === $captured_update ) {
+		auto_linker_log(
+			'bot-rtc-ydoc-link',
+			array(
+				'ok'      => false,
+				'room'    => $room,
+				'term'    => $match['term'],
+				'message' => 'No YDoc update was emitted.',
+			)
+		);
+		return null;
+	}
+
+	$bot_client_id = auto_linker_get_bot_client_id( $bot_user->ID );
+	$update_data   = base64_encode( $captured_update );
+	$selection = auto_linker_build_ydoc_text_selection(
+		$candidate['text_type'],
+		(int) $match['start'] + strlen( (string) $match['opening_text'] ),
+		(int) $match['length'],
+		(int) $match['start'],
+		(int) $match['start'] + (int) $match['length']
+	);
+	$awareness = $selection
+		? auto_linker_build_bot_selection_awareness(
+			$bot_user,
+			$post_id,
+			(string) $match['matched_text'],
+			$selection
+		)
+		: auto_linker_build_bot_awareness_state( $bot_user, $post_id, (string) $match['matched_text'] );
+
+	$result = auto_linker_post_bot_update( $post_id, $room, $bot_client_id, $update_data, $awareness );
+	$ok     = ! is_wp_error( $result );
+	auto_linker_log(
+		'bot-rtc-ydoc-link',
+		$ok
+			? array(
+				'ok'              => true,
+				'room'            => $room,
+				'path'            => $candidate['path'],
+				'term'            => $match['term'],
+				'matched_text'    => $match['matched_text'],
+				'replacement'     => $match['replacement'],
+				'selection'        => $selection,
+				'selection_mode'   => 'raw_word_positions_visible_offsets',
+				'update_bytes'    => strlen( $captured_update ),
+				'response_status' => $result->get_status(),
+			)
+			: array(
+				'ok'      => false,
+				'room'    => $room,
+				'term'    => $match['term'],
+				'code'    => $result->get_error_code(),
+				'message' => $result->get_error_message(),
+			)
+	);
+
+	if ( ! $ok ) {
+		return null;
+	}
+
+	$state['selection_until'] = time() + 4;
+
+	return array(
+		'ok'               => true,
+		'bot_client_id'    => $bot_client_id,
+		'update_data'      => $update_data,
+		'update_bytes'     => strlen( $captured_update ),
+		'term'             => $match['term'],
+		'matched_text'     => $match['matched_text'],
+		'replacement'      => $match['replacement'],
+		'response_status'  => $result->get_status(),
+		'response_payload' => $result->get_data(),
+	);
+}
+
+/**
+ * Builds a Gutenberg awareness selection for a nested Y.Text range.
+ *
+ * @return array<string,mixed>|null
+ */
+function auto_linker_build_ydoc_text_selection( \Yjs\YNestedText $text_type, int $start, int $length, ?int $absolute_start = null, ?int $absolute_end = null ): ?array {
+	try {
+		$start_position = $text_type->relativePositionAt( $start )->toJSON();
+		$end_position   = $text_type->relativePositionAt( $start + $length )->toJSON();
+	} catch ( Throwable $exception ) {
+		auto_linker_log(
+			'bot-rtc-ydoc-selection-error',
+			array(
+				'type_id' => $text_type->idKey(),
+				'start'   => $start,
+				'length'  => $length,
+				'absolute_start' => $absolute_start,
+				'absolute_end'   => $absolute_end,
+				'message' => $exception->getMessage(),
+			)
+		);
+		return null;
+	}
+
+	$type           = isset( $start_position['type'] ) && is_array( $start_position['type'] )
+		? $start_position['type']
+		: ( isset( $end_position['type'] ) && is_array( $end_position['type'] ) ? $end_position['type'] : null );
+
+	if ( ! $type ) {
+		return null;
+	}
+
+	return array(
+		'type'         => $type,
+		'start_item'   => isset( $start_position['item'] ) && is_array( $start_position['item'] ) ? $start_position['item'] : null,
+		'end_item'     => isset( $end_position['item'] ) && is_array( $end_position['item'] ) ? $end_position['item'] : null,
+		'start_offset' => $absolute_start ?? $start,
+		'end_offset'   => $absolute_end ?? ( $start + $length ),
+	);
+}
+
+/**
+ * Finds the active paragraph Y.Text from the editor awareness cursor.
+ *
+ * @param array<string,mixed> $room_request Current sync room request.
+ * @return array{text_type:\Yjs\YNestedText,text:string,path:string}|null
+ */
+function auto_linker_ydoc_find_awareness_link_candidate( \Yjs\YDoc $doc, array $room_request ): ?array {
+	$type_id = auto_linker_ydoc_awareness_text_type_id( $room_request );
+	if ( '' === $type_id ) {
+		return null;
+	}
+
+	try {
+		$text_type = $doc->nestedSharedType( $type_id );
+	} catch ( Throwable $exception ) {
+		return null;
+	}
+
+	if ( ! $text_type instanceof \Yjs\YNestedText ) {
+		return null;
+	}
+
+	return array(
+		'text_type' => $text_type,
+		'text'      => $text_type->toString(),
+		'path'      => 'awareness:' . $type_id,
+	);
+}
+
+/**
+ * Gets the nested Y.Text ID from a Gutenberg awareness selection.
+ *
+ * @param array<string,mixed> $room_request Current sync room request.
+ */
+function auto_linker_ydoc_awareness_text_type_id( array $room_request ): string {
+	$selection = $room_request['awareness']['editorState']['selection'] ?? null;
+	if ( ! is_array( $selection ) ) {
+		return '';
+	}
+
+	$positions = array(
+		$selection['cursorPosition'] ?? null,
+		$selection['cursorStartPosition'] ?? null,
+		$selection['cursorEndPosition'] ?? null,
+		$selection['start'] ?? null,
+		$selection['end'] ?? null,
+	);
+
+	foreach ( $positions as $position ) {
+		if ( ! is_array( $position ) ) {
+			continue;
+		}
+
+		$type = $position['relativePosition']['type'] ?? null;
+		if ( ! is_array( $type ) || ! isset( $type['client'], $type['clock'] ) ) {
+			continue;
+		}
+
+		$client = (int) $type['client'];
+		$clock  = (int) $type['clock'];
+		if ( $client > 0 && $clock >= 0 ) {
+			return $client . ':' . $clock;
+		}
+	}
+
+	return '';
+}
+
+/**
+ * Builds diagnostic context for a failed YDoc candidate scan.
+ *
+ * @param array<string,mixed> $room_request Current sync room request.
+ * @return array<string,mixed>
+ */
+function auto_linker_ydoc_link_candidate_diagnostics( \Yjs\YDoc $doc, array $room_request ): array {
+	$awareness_type_id = auto_linker_ydoc_awareness_text_type_id( $room_request );
+	$awareness         = array(
+		'type_id'  => $awareness_type_id,
+		'resolved' => false,
+	);
+
+	if ( '' !== $awareness_type_id ) {
+		try {
+			$awareness_text_type = $doc->nestedSharedType( $awareness_type_id );
+			if ( $awareness_text_type instanceof \Yjs\YNestedText ) {
+				$awareness['resolved'] = true;
+				$awareness['text']     = auto_linker_preview_text( $awareness_text_type->toString() );
+			} elseif ( null === $awareness_text_type ) {
+				$awareness['resolved_as'] = null;
+			} else {
+				$awareness['resolved_as'] = get_debug_type( $awareness_text_type );
+			}
+		} catch ( Throwable $exception ) {
+			$awareness['error'] = $exception->getMessage();
+		}
+
+		if ( method_exists( $doc, 'debugStruct' ) ) {
+			try {
+				$awareness['struct'] = $doc->debugStruct( $awareness_type_id );
+			} catch ( Throwable $exception ) {
+				$awareness['struct_error'] = $exception->getMessage();
+			}
+		}
+	}
+
+	$paragraphs = auto_linker_ydoc_collect_paragraphs( $doc );
+	$previews   = array();
+	foreach ( array_slice( $paragraphs, -8 ) as $paragraph ) {
+		$text = (string) ( $paragraph['text'] ?? '' );
+		$preview = array(
+			'path'          => (string) ( $paragraph['path'] ?? '' ),
+			'length'        => strlen( $text ),
+			'has_link_term' => (bool) auto_linker_ydoc_candidate_match( $paragraph ),
+			'text'          => auto_linker_preview_text( $text ),
+		);
+		if ( 'serialized_paragraph_html' === ( $paragraph['match_mode'] ?? '' ) ) {
+			$preview['serialized_paragraphs'] = auto_linker_serialized_paragraph_diagnostics( $text );
+		}
+		$previews[] = $preview;
+	}
+
+	return array(
+		'awareness'         => $awareness,
+		'root_keys'         => array_keys( $doc->toJSON() ),
+		'paragraph_count'   => count( $paragraphs ),
+		'paragraph_previews' => $previews,
+	);
+}
+
+/**
+ * Truncates diagnostic text while preserving enough context for logs.
+ */
+function auto_linker_preview_text( string $text, int $limit = 160 ): string {
+	$text = preg_replace( '/\s+/', ' ', $text ) ?? $text;
+	if ( strlen( $text ) <= $limit ) {
+		return $text;
+	}
+
+	return substr( $text, 0, $limit ) . '...';
+}
+
+/**
+ * Builds paragraph-level diagnostics for serialized post content.
+ *
+ * @return array<int,array{index:int,length:int,has_link_term:bool,text:string}>
+ */
+function auto_linker_serialized_paragraph_diagnostics( string $text ): array {
+	if ( ! preg_match_all( '/<p\b[^>]*>(.*?)<\/p>/is', $text, $paragraphs, PREG_OFFSET_CAPTURE ) ) {
+		return array();
+	}
+
+	$diagnostics = array();
+	foreach ( array_slice( $paragraphs[1], 0, 8 ) as $index => $paragraph ) {
+		$inner_html = (string) $paragraph[0];
+		$diagnostics[] = array(
+			'index'         => $index,
+			'length'        => strlen( $inner_html ),
+			'has_link_term' => (bool) auto_linker_find_first_unlinked_term( $inner_html, auto_linker_get_terms() ),
+			'text'          => auto_linker_preview_text( $inner_html, 120 ),
+		);
+	}
+
+	return $diagnostics;
+}
+
+/**
+ * Posts a bot-generated update to the Gutenberg sync endpoint.
+ */
+function auto_linker_post_bot_update( int $post_id, string $room, int $bot_client_id, string $update_data, array $awareness ) {
+	$previous_user_id = get_current_user_id();
+	wp_set_current_user( auto_linker_get_bot_user_id() );
+
+	$request = new WP_REST_Request( 'POST', '/wp-sync/v1/updates' );
+	$request->set_body_params(
+		array(
+			'rooms' => array(
+				array(
+					'after'     => 0,
+					'awareness' => $awareness,
+					'client_id' => $bot_client_id,
+					'room'      => $room,
+					'updates'   => array(
+						array(
+							'type' => 'update',
+							'data' => $update_data,
+						),
+					),
+				),
+			),
+		)
+	);
+
+	$response = rest_do_request( $request );
+	wp_set_current_user( $previous_user_id );
+
+	return $response->is_error() ? $response->as_error() : $response;
+}
+
+/**
+ * Finds the most recent paragraph nested Y.Text with a linkable term.
+ *
+ * @return array{text_type:\Yjs\YNestedText,text:string,path:string}|null
+ */
+function auto_linker_ydoc_find_first_link_candidate( \Yjs\YDoc $doc ): ?array {
+	$paragraphs = auto_linker_ydoc_collect_paragraphs( $doc );
+	for ( $index = count( $paragraphs ) - 1; $index >= 0; $index-- ) {
+		$paragraph = $paragraphs[ $index ];
+		if ( auto_linker_ydoc_candidate_match( $paragraph ) ) {
+			return $paragraph;
+		}
+	}
+
+	return null;
+}
+
+/**
+ * Finds a linkable match for a YDoc text candidate.
+ *
+ * @param array{text:string,path?:string,match_mode?:string} $candidate Candidate metadata.
+ * @return array{term:string,url:string,matched_text:string,start:int,length:int,replacement:string,opening_text:string,closing_text:string}|null
+ */
+function auto_linker_ydoc_candidate_match( array $candidate ): ?array {
+	$text       = (string) ( $candidate['text'] ?? '' );
+	$match_mode = (string) ( $candidate['match_mode'] ?? '' );
+	if ( '' === $match_mode && str_contains( $text, '<!-- wp:' ) && str_contains( $text, '<p' ) ) {
+		$match_mode = 'serialized_paragraph_html';
+	}
+
+	return 'serialized_paragraph_html' === $match_mode
+		? auto_linker_find_first_serialized_paragraph_term( $text, auto_linker_get_terms() )
+		: auto_linker_find_first_unlinked_term( $text, auto_linker_get_terms() );
+}
+
+/**
+ * Collects paragraph nested Y.Text handles from the materialized Gutenberg YDoc.
+ *
+ * @return array<int,array{text_type:\Yjs\YNestedText,text:string,path:string,match_mode?:string}>
+ */
+function auto_linker_ydoc_collect_paragraphs( \Yjs\YDoc $doc ): array {
+	$paragraphs = array();
+	foreach ( $doc->toJSON() as $name => $value ) {
+		try {
+			$shared = is_array( $value ) && array_is_list( $value )
+				? $doc->getArray( (string) $name )
+				: ( is_array( $value ) ? $doc->getMap( (string) $name ) : null );
+		} catch ( Throwable $exception ) {
+			$shared = null;
+		}
+		auto_linker_ydoc_collect_paragraphs_in_shared_type( $shared, (string) $name, $paragraphs );
+	}
+
+	return $paragraphs;
+}
+
+/**
+ * @param array<int,array{text_type:\Yjs\YNestedText,text:string,path:string,match_mode?:string}> $paragraphs Collected paragraph refs.
+ */
+function auto_linker_ydoc_collect_paragraphs_in_map( $map, string $path, array &$paragraphs ): void {
+	$name = $map->get( 'name' );
+	if ( 'core/paragraph' === $name ) {
+		$text_type = auto_linker_ydoc_paragraph_content_text( $map );
+		if ( $text_type ) {
+			$paragraphs[] = array(
+				'text_type' => $text_type,
+				'text'      => $text_type->toString(),
+				'path'      => $path . '.attributes.content',
+			);
+		}
+	}
+
+	foreach ( $map->entries() as $key => $value ) {
+		unset( $value );
+		try {
+			$shared = $map->getSharedType( (string) $key );
+		} catch ( Throwable $exception ) {
+			$shared = null;
+		}
+
+		if ( 'document' === $path && 'content' === (string) $key && $shared instanceof \Yjs\YNestedText ) {
+			$paragraphs[] = array(
+				'text_type'  => $shared,
+				'text'       => $shared->toString(),
+				'path'       => $path . '.content',
+				'match_mode' => 'serialized_paragraph_html',
+			);
+		}
+
+		auto_linker_ydoc_collect_paragraphs_in_shared_type( $shared, $path . '.' . (string) $key, $paragraphs );
+	}
+}
+
+/**
+ * @param array<int,array{text_type:\Yjs\YNestedText,text:string,path:string,match_mode?:string}> $paragraphs Collected paragraph refs.
+ */
+function auto_linker_ydoc_collect_paragraphs_in_array( \Yjs\YNestedArray|\Yjs\YArray $array, string $path, array &$paragraphs ): void {
+	for ( $index = 0; $index < $array->length(); $index++ ) {
+		try {
+			$shared = $array->getSharedType( $index );
+		} catch ( Throwable $exception ) {
+			$shared = null;
+		}
+		auto_linker_ydoc_collect_paragraphs_in_shared_type( $shared, $path . '[' . $index . ']', $paragraphs );
+	}
+}
+
+/**
+ * @param array<int,array{text_type:\Yjs\YNestedText,text:string,path:string,match_mode?:string}> $paragraphs Collected paragraph refs.
+ */
+function auto_linker_ydoc_collect_paragraphs_in_shared_type( $shared, string $path, array &$paragraphs ): void {
+	if ( $shared instanceof \Yjs\YNestedMap || $shared instanceof \Yjs\YMap ) {
+		auto_linker_ydoc_collect_paragraphs_in_map( $shared, $path, $paragraphs );
+		return;
+	}
+
+	if ( $shared instanceof \Yjs\YNestedArray || $shared instanceof \Yjs\YArray ) {
+		auto_linker_ydoc_collect_paragraphs_in_array( $shared, $path, $paragraphs );
+	}
+}
+
+/**
+ * Gets the paragraph content text shared type from a Gutenberg paragraph map.
+ */
+function auto_linker_ydoc_paragraph_content_text( $paragraph_map ): ?\Yjs\YNestedText {
+	try {
+		$attributes = $paragraph_map->getMap( 'attributes' );
+		if ( $attributes ) {
+			$content = $attributes->getText( 'content' );
+			if ( $content ) {
+				return $content;
+			}
+		}
+	} catch ( Throwable $exception ) {
+	}
+
+	try {
+		$content = $paragraph_map->getText( 'content' );
+		if ( $content ) {
+			return $content;
+		}
+	} catch ( Throwable $exception ) {
+	}
+
+	return null;
 }
 
 /**
@@ -633,530 +1431,6 @@ function auto_linker_append_bot_update_to_response( $response, string $room, arr
 }
 
 /**
- * Auto-links matching terms in linkable paragraph text events.
- *
- * @param array<string, mixed>                          $state      Current paragraph document state.
- * @param array<int, \Auto_Linker\Gutenberg_RTC\Gutenberg_RTC_Completed_Paragraph> $paragraphs Linkable paragraph text events.
- */
-function auto_linker_link_completed_paragraphs( int $post_id, string $room, array &$state, array $paragraphs ): array {
-	$bot_updates = array();
-
-	foreach ( $paragraphs as $paragraph ) {
-		if ( ! $paragraph instanceof \Auto_Linker\Gutenberg_RTC\Gutenberg_RTC_Completed_Paragraph ) {
-			continue;
-		}
-
-		if ( auto_linker_has_pending_link_for_block( $state, $paragraph->source_block_id() ) ) {
-			auto_linker_log(
-				'bot-rtc-auto-link-skip',
-				array(
-					'room'     => $room,
-					'block_id' => $paragraph->source_block_id(),
-					'reason'   => 'pending_link_exists',
-					'text'     => $paragraph->text(),
-				)
-			);
-			continue;
-		}
-
-		$dedupe_key = $paragraph->dedupe_key();
-		if ( isset( $state['processed'][ $dedupe_key ] ) ) {
-			continue;
-		}
-
-		$state['processed'][ $dedupe_key ] = time();
-		auto_linker_set_room_state( $post_id, $state );
-
-		$terms = auto_linker_get_terms();
-		auto_linker_log(
-			'bot-rtc-auto-link-candidate',
-			array(
-				'room'       => $room,
-				'block_id'   => $paragraph->source_block_id(),
-				'text'       => $paragraph->text(),
-				'term_count' => count( $terms ),
-				'terms'      => array_map(
-					static fn( array $term ): string => (string) ( $term['term'] ?? '' ),
-					$terms
-				),
-			)
-		);
-
-		$match = auto_linker_find_first_unlinked_term( $paragraph->text(), $terms );
-		if ( ! $match ) {
-			auto_linker_log(
-				'bot-rtc-auto-link-skip',
-				array(
-					'room'   => $room,
-					'reason' => 'no_matching_term',
-					'text'   => $paragraph->text(),
-				)
-			);
-			continue;
-		}
-
-		$result = auto_linker_queue_bot_term_link( $post_id, $room, $state, $dedupe_key, $match, $paragraph );
-		auto_linker_log(
-			'bot-rtc-auto-link-highlight',
-			is_wp_error( $result )
-				? array(
-					'ok'      => false,
-					'room'    => $room,
-					'term'    => $match['term'],
-					'code'    => $result->get_error_code(),
-					'message' => $result->get_error_message(),
-				)
-				: array_merge( array( 'room' => $room ), $result )
-		);
-
-		if ( ! is_wp_error( $result ) && is_array( $result ) ) {
-			break;
-		}
-	}
-
-	return $bot_updates;
-}
-
-/**
- * Links matching terms in serialized document.content when Gutenberg rewrites it after a block link.
- *
- * @param array<string, mixed> $state State, mutated in place.
- * @return array<int,array<string,mixed>>
- */
-function auto_linker_emit_root_content_links( int $post_id, string $room, array &$state ): array {
-	$root_content = isset( $state['root_content'] ) ? (string) $state['root_content'] : '';
-	if ( '' === $root_content ) {
-		return array();
-	}
-
-	$match = auto_linker_find_first_unlinked_term( $root_content, auto_linker_get_terms() );
-	if ( ! $match ) {
-		return array();
-	}
-
-	$result = auto_linker_emit_root_content_term_link( $post_id, $room, $state, $match );
-	auto_linker_log(
-		'bot-rtc-root-content-link',
-		is_wp_error( $result )
-			? array(
-				'ok'      => false,
-				'room'    => $room,
-				'term'    => $match['term'],
-				'code'    => $result->get_error_code(),
-				'message' => $result->get_error_message(),
-			)
-			: array_merge( array( 'room' => $room ), $result )
-	);
-
-	return ! is_wp_error( $result ) && is_array( $result ) ? array( $result ) : array();
-}
-
-/**
- * Emits a bot-authored term link into the serialized document.content Y.Text.
- *
- * @param array<string, mixed> $state State, mutated in place.
- * @param array{term:string,url:string,matched_text:string,start:int,length:int,replacement:string,opening_text:string,closing_text:string} $match Match metadata.
- * @return array<string, mixed>|WP_Error
- */
-function auto_linker_emit_root_content_term_link( int $post_id, string $room, array &$state, array $match ) {
-	if ( ! $post_id || '' === $room ) {
-		return new WP_Error( 'auto_linker_missing_room', __( 'Missing Auto Linker room.', 'auto-linker' ) );
-	}
-
-	$bot_user_id = auto_linker_get_bot_user_id();
-	if ( ! $bot_user_id ) {
-		return new WP_Error( 'auto_linker_missing_bot_user', __( 'No Auto Linker bot user is configured.', 'auto-linker' ) );
-	}
-
-	$bot_user = get_user_by( 'id', $bot_user_id );
-	if ( ! $bot_user || ! user_can( $bot_user, 'edit_post', $post_id ) ) {
-		return new WP_Error( 'auto_linker_bot_cannot_edit', __( 'The configured Auto Linker bot user cannot edit this post.', 'auto-linker' ) );
-	}
-
-	$bot_client_id = auto_linker_get_bot_client_id( $bot_user_id );
-	$start_clock   = auto_linker_get_bot_clock( $post_id, $bot_client_id );
-	$link_update   = \Auto_Linker\Gutenberg_RTC\gutenberg_rtc_build_root_content_text_wrap(
-		$state,
-		(int) $match['start'],
-		(int) $match['length'],
-		(string) $match['opening_text'],
-		(string) $match['closing_text'],
-		$bot_client_id,
-		$start_clock
-	);
-	if ( ! $link_update ) {
-		return new WP_Error( 'auto_linker_no_root_content_replacement', __( 'Could not build a serialized content link.', 'auto-linker' ) );
-	}
-
-	$update           = $link_update['update'];
-	$update_data      = base64_encode( $update );
-	$previous_user_id = get_current_user_id();
-	wp_set_current_user( $bot_user_id );
-
-	$request = new WP_REST_Request( 'POST', '/wp-sync/v1/updates' );
-	$request->set_body_params(
-		array(
-			'rooms' => array(
-				array(
-					'after'     => 0,
-					'awareness' => array(
-						'collaboratorInfo' => auto_linker_build_collaborator_info( $bot_user ),
-						'editorState'      => array(
-							'selection' => array(
-								'type' => 'none',
-							),
-						),
-						'autoLinkerState'  => array(
-							'postId'      => $post_id,
-							'changedText' => (string) $match['replacement'],
-						),
-					),
-					'client_id' => $bot_client_id,
-					'room'      => $room,
-					'updates'   => array(
-						array(
-							'type' => 'update',
-							'data' => $update_data,
-						),
-					),
-				),
-			),
-		)
-	);
-
-	$response = rest_do_request( $request );
-	wp_set_current_user( $previous_user_id );
-
-	if ( $response->is_error() ) {
-		return $response->as_error();
-	}
-
-	try {
-		$decoded = \Auto_Linker\Gutenberg_RTC\gutenberg_yjs_decode_update_v2( $update );
-		\Auto_Linker\Gutenberg_RTC\gutenberg_rtc_apply_decoded_update_to_paragraph_state( $state, $decoded );
-		$state['root_content'] = auto_linker_replace_first_match( (string) ( $state['root_content'] ?? '' ), $match );
-		auto_linker_set_room_state( $post_id, $state );
-	} catch ( RuntimeException $exception ) {
-		auto_linker_log(
-			'bot-rtc-state-apply-error',
-			array(
-				'room'    => $room,
-				'message' => $exception->getMessage(),
-			)
-		);
-	}
-
-	auto_linker_set_bot_clock( $post_id, $bot_client_id, (int) $link_update['next_clock'] );
-
-	return array(
-		'ok'               => true,
-		'bot_client_id'    => $bot_client_id,
-		'start_clock'      => $start_clock,
-		'next_clock'       => (int) $link_update['next_clock'],
-		'update_bytes'     => strlen( $update ),
-		'update_data'      => $update_data,
-		'term'             => $match['term'],
-		'url'              => $match['url'],
-		'matched_text'     => $match['matched_text'],
-		'replacement'      => $match['replacement'],
-		'opening_text'     => $match['opening_text'],
-		'closing_text'     => $match['closing_text'],
-		'open_origin'      => $link_update['open_origin'],
-		'open_right'       => $link_update['open_right'],
-		'close_origin'     => $link_update['close_origin'],
-		'close_right'      => $link_update['close_right'],
-		'response_status'  => $response->get_status(),
-		'response_payload' => $response->get_data(),
-	);
-}
-
-/**
- * Emits bot selection awareness and queues the actual link mutation for a later sync turn.
- *
- * @param array<string, mixed> $state State, mutated in place.
- * @param array{term:string,url:string,matched_text:string,start:int,length:int,replacement:string,opening_text:string,closing_text:string} $match Match metadata.
- * @return array<string, mixed>|WP_Error
- */
-function auto_linker_queue_bot_term_link( int $post_id, string $room, array &$state, string $dedupe_key, array $match, \Auto_Linker\Gutenberg_RTC\Gutenberg_RTC_Completed_Paragraph $paragraph ) {
-	$bot_user_id = auto_linker_get_bot_user_id();
-	if ( ! $bot_user_id ) {
-		return new WP_Error( 'auto_linker_missing_bot_user', __( 'No Auto Linker bot user is configured.', 'auto-linker' ) );
-	}
-
-	$bot_user = get_user_by( 'id', $bot_user_id );
-	if ( ! $bot_user || ! user_can( $bot_user, 'edit_post', $post_id ) ) {
-		return new WP_Error( 'auto_linker_bot_cannot_edit', __( 'The configured Auto Linker bot user cannot edit this post.', 'auto-linker' ) );
-	}
-
-	$link_update = \Auto_Linker\Gutenberg_RTC\gutenberg_rtc_build_text_wrap(
-		$state,
-		$paragraph,
-		(int) $match['start'],
-		(int) $match['length'],
-		(string) $match['opening_text'],
-		(string) $match['closing_text'],
-		auto_linker_get_bot_client_id( $bot_user_id ),
-		auto_linker_get_bot_clock( $post_id, auto_linker_get_bot_client_id( $bot_user_id ) )
-	);
-	if ( ! $link_update ) {
-		return new WP_Error( 'auto_linker_no_selection', __( 'Could not build a term selection for this paragraph.', 'auto-linker' ) );
-	}
-
-	$result = auto_linker_emit_bot_selection_awareness(
-		$post_id,
-		$room,
-		(string) $match['replacement'],
-		$link_update['selection']
-	);
-	if ( is_wp_error( $result ) ) {
-		return $result;
-	}
-
-	if ( ! isset( $state['pending_links'] ) || ! is_array( $state['pending_links'] ) ) {
-		$state['pending_links'] = array();
-	}
-
-	$state['pending_links'][ $dedupe_key ] = array(
-		'block_id'       => $paragraph->source_block_id(),
-		'term'           => (string) $match['term'],
-		'url'            => (string) $match['url'],
-		'queued_at'      => time(),
-		'attempts'       => 0,
-		'awaiting_fetch' => true,
-	);
-	auto_linker_set_room_state( $post_id, $state );
-
-	return array(
-		'ok'              => true,
-		'queued'          => true,
-		'room'            => $room,
-		'block_id'        => $paragraph->source_block_id(),
-		'term'            => $match['term'],
-		'matched_text'    => $match['matched_text'],
-		'replacement'     => $match['replacement'],
-		'selection'       => $link_update['selection'],
-		'response_status' => $result->get_status(),
-	);
-}
-
-/**
- * Checks whether a block already has a queued link mutation.
- *
- * @param array<string, mixed> $state State.
- */
-function auto_linker_has_pending_link_for_block( array $state, string $block_id ): bool {
-	if ( '' === $block_id || empty( $state['pending_links'] ) || ! is_array( $state['pending_links'] ) ) {
-		return false;
-	}
-
-	foreach ( $state['pending_links'] as $pending_link ) {
-		if ( is_array( $pending_link ) && $block_id === (string) ( $pending_link['block_id'] ?? '' ) ) {
-			return true;
-		}
-	}
-
-	return false;
-}
-
-/**
- * Removes all queued link mutations for a block.
- *
- * @param array<string, mixed> $state State, mutated in place.
- */
-function auto_linker_remove_pending_links_for_block( array &$state, string $block_id ): bool {
-	if ( '' === $block_id || empty( $state['pending_links'] ) || ! is_array( $state['pending_links'] ) ) {
-		return false;
-	}
-
-	$removed = false;
-	foreach ( array_keys( $state['pending_links'] ) as $pending_key ) {
-		$pending_link = $state['pending_links'][ $pending_key ];
-		if ( is_array( $pending_link ) && $block_id === (string) ( $pending_link['block_id'] ?? '' ) ) {
-			unset( $state['pending_links'][ $pending_key ] );
-			$removed = true;
-		}
-	}
-
-	return $removed;
-}
-
-/**
- * Emits one queued bot link mutation after its selection awareness has had a sync turn to render.
- *
- * @param array<string, mixed> $state State, mutated in place.
- * @return array<int,array<string,mixed>>
- */
-function auto_linker_emit_pending_links( int $post_id, string $room, array &$state ): array {
-	if ( empty( $state['pending_links'] ) || ! is_array( $state['pending_links'] ) ) {
-		return array();
-	}
-
-	auto_linker_log(
-		'bot-rtc-pending-link-check',
-		array(
-			'room'          => $room,
-			'post_id'       => $post_id,
-			'pending_count' => count( $state['pending_links'] ),
-			'pending_keys'  => array_keys( $state['pending_links'] ),
-		)
-	);
-
-	$bot_updates = array();
-	$changed     = false;
-	foreach ( $state['pending_links'] as $pending_key => $pending_link ) {
-		if ( ! is_array( $pending_link ) ) {
-			auto_linker_log(
-				'bot-rtc-pending-link-drop',
-				array(
-					'room'   => $room,
-					'key'    => (string) $pending_key,
-					'reason' => 'pending_link_must_be_object',
-				)
-			);
-			unset( $state['pending_links'][ $pending_key ] );
-			$changed = true;
-			continue;
-		}
-
-		$block_id = isset( $pending_link['block_id'] ) ? (string) $pending_link['block_id'] : '';
-		$block    = $block_id && isset( $state['blocks'][ $block_id ] ) && is_array( $state['blocks'][ $block_id ] ) ? $state['blocks'][ $block_id ] : null;
-		$text     = is_array( $block ) ? (string) ( $block['content'] ?? '' ) : '';
-		$block_yid = is_array( $block ) && isset( $block['id'] ) && is_array( $block['id'] ) ? $block['id'] : null;
-
-		if ( '' === $block_id || '' === $text || ! $block_yid ) {
-			auto_linker_log(
-				'bot-rtc-pending-link-drop',
-				array(
-					'room'     => $room,
-					'key'      => (string) $pending_key,
-					'block_id' => $block_id,
-					'reason'   => '' === $block_id ? 'missing_block_id' : ( '' === $text ? 'empty_block_text' : 'missing_block_yjs_id' ),
-				)
-			);
-			unset( $state['pending_links'][ $pending_key ] );
-			$changed = true;
-			continue;
-		}
-
-		if ( ! empty( $pending_link['awaiting_fetch'] ) ) {
-			auto_linker_log(
-				'bot-rtc-pending-link-wait',
-				array(
-					'room'     => $room,
-					'key'      => (string) $pending_key,
-					'block_id' => $block_id,
-					'text'     => $text,
-					'reason'   => 'awaiting_highlight_fetch',
-				)
-			);
-			$state['pending_links'][ $pending_key ]['awaiting_fetch'] = false;
-			auto_linker_set_room_state( $post_id, $state );
-			break;
-		}
-
-		$match = auto_linker_find_first_unlinked_term( $text, auto_linker_get_terms() );
-		if ( ! $match ) {
-			$attempts = (int) ( $pending_link['attempts'] ?? 0 ) + 1;
-			if ( $attempts < 5 && ! auto_linker_block_appears_linked( $text, (string) ( $pending_link['url'] ?? '' ) ) ) {
-				auto_linker_log(
-					'bot-rtc-pending-link-wait',
-					array(
-						'room'     => $room,
-						'key'      => (string) $pending_key,
-						'block_id' => $block_id,
-						'reason'   => 'no_matching_unlinked_term_retry',
-						'attempts' => $attempts,
-						'text'     => $text,
-					)
-				);
-				$state['pending_links'][ $pending_key ]['attempts'] = $attempts;
-				auto_linker_set_room_state( $post_id, $state );
-				break;
-			}
-
-			auto_linker_log(
-				'bot-rtc-pending-link-drop',
-				array(
-					'room'     => $room,
-					'key'      => (string) $pending_key,
-					'block_id' => $block_id,
-					'reason'   => 'no_matching_unlinked_term',
-					'attempts' => $attempts,
-					'text'     => $text,
-				)
-			);
-			auto_linker_remove_pending_links_for_block( $state, $block_id );
-			$changed = true;
-			continue;
-		}
-
-		$paragraph = new \Auto_Linker\Gutenberg_RTC\Gutenberg_RTC_Completed_Paragraph(
-			$block_id,
-			$text,
-			$block_yid,
-			null
-		);
-		auto_linker_log(
-			'bot-rtc-pending-link-emit',
-			array(
-				'room'         => $room,
-				'key'          => (string) $pending_key,
-				'block_id'     => $block_id,
-				'term'         => $match['term'],
-				'matched_text' => $match['matched_text'],
-				'start'        => $match['start'],
-				'length'       => $match['length'],
-				'text'         => $text,
-			)
-		);
-		$result = auto_linker_emit_bot_term_link( $post_id, $room, $match, $paragraph );
-		auto_linker_log(
-			'bot-rtc-auto-link',
-			is_wp_error( $result )
-				? array(
-					'ok'      => false,
-					'room'    => $room,
-					'term'    => $match['term'],
-					'code'    => $result->get_error_code(),
-					'message' => $result->get_error_message(),
-				)
-				: array_merge( array( 'room' => $room ), $result )
-		);
-
-		auto_linker_remove_pending_links_for_block( $state, $block_id );
-		$changed = true;
-		if ( ! is_wp_error( $result ) && is_array( $result ) ) {
-			$latest_state = auto_linker_get_room_state( $post_id );
-			auto_linker_remove_pending_links_for_block( $latest_state, $block_id );
-			$state = $latest_state;
-			auto_linker_set_room_state( $post_id, $state );
-			$bot_updates[] = $result;
-		} else {
-			auto_linker_set_room_state( $post_id, $state );
-		}
-
-		break;
-	}
-
-	if ( $changed ) {
-		auto_linker_set_room_state( $post_id, $state );
-	}
-
-	return $bot_updates;
-}
-
-/**
- * Checks whether a pending term has already landed as a link in the block text.
- */
-function auto_linker_block_appears_linked( string $text, string $url ): bool {
-	if ( '' === $url ) {
-		return false;
-	}
-
-	return false !== stripos( $text, '<a ' ) && false !== strpos( html_entity_decode( $text, ENT_QUOTES | ENT_HTML5, 'UTF-8' ), $url );
-}
-
-/**
  * Finds the first configured term that is not already inside markup.
  *
  * @param array<int,array{term:string,url:string}> $terms Terms.
@@ -1197,6 +1471,33 @@ function auto_linker_find_first_unlinked_term( string $text, array $terms ): ?ar
 				'closing_text' => '</a>',
 			);
 		}
+	}
+
+	return null;
+}
+
+/**
+ * Finds a configured term inside serialized paragraph HTML.
+ *
+ * @param array<int,array{term:string,url:string}> $terms Terms.
+ * @return array{term:string,url:string,matched_text:string,start:int,length:int,replacement:string,opening_text:string,closing_text:string}|null
+ */
+function auto_linker_find_first_serialized_paragraph_term( string $text, array $terms ): ?array {
+	if ( ! preg_match_all( '/<p\b[^>]*>(.*?)<\/p>/is', $text, $paragraphs, PREG_OFFSET_CAPTURE ) ) {
+		return null;
+	}
+
+	foreach ( $paragraphs[1] as $paragraph ) {
+		$inner_html        = (string) $paragraph[0];
+		$inner_byte_offset = (int) $paragraph[1];
+		$match             = auto_linker_find_first_unlinked_term( $inner_html, $terms );
+		if ( ! $match ) {
+			continue;
+		}
+
+		$match['start'] += \Auto_Linker\Gutenberg_RTC\gutenberg_yjs_utf16_clock_len( substr( $text, 0, $inner_byte_offset ) );
+
+		return $match;
 	}
 
 	return null;
@@ -1247,137 +1548,6 @@ function auto_linker_build_opening_anchor_html( string $url ): string {
 }
 
 /**
- * Emits a bot-authored term replacement into a Gutenberg sync room.
- *
- * @param array{term:string,url:string,matched_text:string,start:int,length:int,replacement:string,opening_text:string,closing_text:string} $match Match metadata.
- * @return array<string, mixed>|WP_Error
- */
-function auto_linker_emit_bot_term_link( int $post_id, string $room, array $match, \Auto_Linker\Gutenberg_RTC\Gutenberg_RTC_Completed_Paragraph $paragraph ) {
-	if ( ! $post_id || '' === $room ) {
-		return new WP_Error( 'auto_linker_missing_room', __( 'Missing Auto Linker room.', 'auto-linker' ) );
-	}
-
-	$bot_user_id = auto_linker_get_bot_user_id();
-	if ( ! $bot_user_id ) {
-		return new WP_Error( 'auto_linker_missing_bot_user', __( 'No Auto Linker bot user is configured.', 'auto-linker' ) );
-	}
-
-	$bot_user = get_user_by( 'id', $bot_user_id );
-	if ( ! $bot_user || ! user_can( $bot_user, 'edit_post', $post_id ) ) {
-		return new WP_Error( 'auto_linker_bot_cannot_edit', __( 'The configured Auto Linker bot user cannot edit this post.', 'auto-linker' ) );
-	}
-
-	$bot_client_id = auto_linker_get_bot_client_id( $bot_user_id );
-	$start_clock   = auto_linker_get_bot_clock( $post_id, $bot_client_id );
-	$state         = auto_linker_get_room_state( $post_id );
-	$link_update   = \Auto_Linker\Gutenberg_RTC\gutenberg_rtc_build_text_wrap(
-		$state,
-		$paragraph,
-		(int) $match['start'],
-		(int) $match['length'],
-		(string) $match['opening_text'],
-		(string) $match['closing_text'],
-		$bot_client_id,
-		$start_clock
-	);
-	if ( ! $link_update ) {
-		return new WP_Error( 'auto_linker_no_replacement', __( 'Could not build a term link for this paragraph.', 'auto-linker' ) );
-	}
-
-	$update           = $link_update['update'];
-	$update_data      = base64_encode( $update );
-	$previous_user_id = get_current_user_id();
-	wp_set_current_user( $bot_user_id );
-
-	$request = new WP_REST_Request( 'POST', '/wp-sync/v1/updates' );
-	$request->set_body_params(
-		array(
-			'rooms' => array(
-				array(
-					'after'     => 0,
-					'awareness' => auto_linker_build_bot_selection_awareness(
-						$bot_user,
-						$post_id,
-						(string) $match['replacement'],
-						$link_update['selection']
-					),
-					'client_id' => $bot_client_id,
-					'room'      => $room,
-					'updates'   => array(
-						array(
-							'type' => 'update',
-							'data' => $update_data,
-						),
-					),
-				),
-			),
-		)
-	);
-
-	$response = rest_do_request( $request );
-	wp_set_current_user( $previous_user_id );
-
-	if ( $response->is_error() ) {
-		return $response->as_error();
-	}
-
-	try {
-		$decoded = \Auto_Linker\Gutenberg_RTC\gutenberg_yjs_decode_update_v2( $update );
-		\Auto_Linker\Gutenberg_RTC\gutenberg_rtc_apply_decoded_update_to_paragraph_state( $state, $decoded );
-		$state['blocks'][ $paragraph->source_block_id() ]['content'] = auto_linker_replace_first_match( $paragraph->text(), $match );
-		auto_linker_set_room_state( $post_id, $state );
-	} catch ( RuntimeException $exception ) {
-		auto_linker_log(
-			'bot-rtc-state-apply-error',
-			array(
-				'room'    => $room,
-				'message' => $exception->getMessage(),
-			)
-		);
-	}
-
-	auto_linker_set_bot_clock( $post_id, $bot_client_id, (int) $link_update['next_clock'] );
-
-	return array(
-		'ok'               => true,
-		'bot_client_id'    => $bot_client_id,
-		'start_clock'      => $start_clock,
-		'next_clock'       => (int) $link_update['next_clock'],
-		'update_bytes'     => strlen( $update ),
-		'update_data'      => $update_data,
-		'term'             => $match['term'],
-		'url'              => $match['url'],
-		'matched_text'     => $match['matched_text'],
-		'replacement'      => $match['replacement'],
-		'opening_text'     => $match['opening_text'],
-		'closing_text'     => $match['closing_text'],
-		'selection'        => $link_update['selection'],
-		'open_origin'      => $link_update['open_origin'],
-		'open_right'       => $link_update['open_right'],
-		'close_origin'     => $link_update['close_origin'],
-		'close_right'      => $link_update['close_right'],
-		'delete_ranges'    => $link_update['delete_ranges'],
-		'response_status'  => $response->get_status(),
-		'response_payload' => $response->get_data(),
-	);
-}
-
-/**
- * Replaces the first matched term in local text state.
- *
- * @param array{term:string,url:string,matched_text:string,start:int,length:int,replacement:string} $match Match metadata.
- */
-function auto_linker_replace_first_match( string $text, array $match ): string {
-	$pattern = '/(?<![\p{L}\p{N}_])' . preg_quote( (string) $match['matched_text'], '/' ) . '(?=[^\p{L}\p{N}_])/u';
-	return preg_replace_callback(
-		$pattern,
-		static fn(): string => (string) $match['replacement'],
-		$text,
-		1
-	) ?? $text;
-}
-
-/**
  * Builds bot awareness for a text selection.
  *
  * @param array<string, mixed> $selection Selection metadata from the RTC builder.
@@ -1397,6 +1567,24 @@ function auto_linker_build_bot_selection_awareness( WP_User $bot_user, int $post
 				'cursorStartPosition' => auto_linker_build_bot_cursor_position( $type, $start_item, $start_offset ),
 				'cursorEndPosition'   => auto_linker_build_bot_cursor_position( $type, $end_item, $end_offset ),
 				'selectionDirection'  => 'f',
+			),
+		),
+		'autoLinkerState'  => array(
+			'postId'      => $post_id,
+			'changedText' => $changed_text,
+		),
+	);
+}
+
+/**
+ * Builds bot awareness without an active selection.
+ */
+function auto_linker_build_bot_awareness_state( WP_User $bot_user, int $post_id, string $changed_text ): array {
+	return array(
+		'collaboratorInfo' => auto_linker_build_collaborator_info( $bot_user ),
+		'editorState'      => array(
+			'selection' => array(
+				'type' => 'none',
 			),
 		),
 		'autoLinkerState'  => array(
@@ -1445,31 +1633,6 @@ function auto_linker_build_bot_cursor_position( array $type, ?array $item, int $
 }
 
 /**
- * Gets the next bot client clock for a post.
- */
-function auto_linker_get_bot_clock( int $post_id, int $bot_client_id ): int {
-	$clocks = get_post_meta( $post_id, AUTO_LINKER_BOT_CLOCK_META_KEY, true );
-	if ( ! is_array( $clocks ) ) {
-		return 0;
-	}
-
-	return isset( $clocks[ (string) $bot_client_id ] ) ? max( 0, (int) $clocks[ (string) $bot_client_id ] ) : 0;
-}
-
-/**
- * Stores the next bot client clock for a post.
- */
-function auto_linker_set_bot_clock( int $post_id, int $bot_client_id, int $clock ): void {
-	$clocks = get_post_meta( $post_id, AUTO_LINKER_BOT_CLOCK_META_KEY, true );
-	if ( ! is_array( $clocks ) ) {
-		$clocks = array();
-	}
-
-	$clocks[ (string) $bot_client_id ] = max( 0, $clock );
-	update_post_meta( $post_id, AUTO_LINKER_BOT_CLOCK_META_KEY, $clocks );
-}
-
-/**
  * Extracts a post ID from a Gutenberg post sync room.
  */
 function auto_linker_get_post_id_from_room( string $room ): int {
@@ -1496,7 +1659,12 @@ function auto_linker_get_room_state( int $post_id ): array {
 	}
 
 	return array_merge(
-		\Auto_Linker\Gutenberg_RTC\gutenberg_rtc_empty_paragraph_document_state( AUTO_LINKER_ROOM_STATE_SCHEMA_VERSION ),
+		array(
+			'schema_version' => AUTO_LINKER_ROOM_STATE_SCHEMA_VERSION,
+			'ydoc_update_v2' => '',
+			'pending_link'   => null,
+			'selection_until' => 0,
+		),
 		$state
 	);
 }
