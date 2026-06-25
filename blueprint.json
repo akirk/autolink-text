@@ -1,63 +1,63 @@
 {
-  "landingPage": "/wp-admin/admin.php?page=autolink-text",
-  "steps": [
-    {
-      "step": "installPlugin",
-      "pluginData": {
-        "resource": "wordpress.org/plugins",
-        "slug": "gutenberg"
-      },
-      "options": {
-        "activate": true
-      }
-    },
-    {
-      "step": "installPlugin",
-      "pluginData": {
-        "resource": "git:directory",
-        "url": "https://github.com/akirk/autolink-text",
-        "ref": "dist/main"
-      },
-      "options": {
-        "activate": true,
-        "targetFolderName": "auto-linker"
-      },
-      "progress": {
-        "caption": "Installing Autolink Text from GitHub"
-      }
-    },
-    {
-      "step": "defineWpConfigConsts",
-      "consts": {
-        "WP_ALLOW_COLLABORATION": true
-      }
-    },
-    {
-      "step": "runPHP",
-      "code": "<?php require_once '/wordpress/wp-load.php'; $data = array( 'user_login' => 'autolink-text', 'user_pass' => 'password', 'role' => 'administrator', 'display_name' => 'Autolink Text',); wp_insert_user( $data ); ?>",
-      "progress": {
-        "caption": "createUser: autolink-text"
-      }
-    },
-    {
-      "step": "setSiteOptions",
-      "options": {
-        "auto_linker_bot_user_id": "2",
-        "auto_linker_terms": [
-          {
-            "term": "Playground",
-            "url": "https://playground.wordpress.net/",
-            "color": "#3858e9",
-            "bg_color": "#f6f7f7",
-            "bold": true
-          }
-        ]
-      }
+    "landingPage": "/wp-admin/admin.php?page=autolink-text",
+    "steps": [
+        {
+            "step": "installPlugin",
+            "pluginData": {
+                "resource": "wordpress.org/plugins",
+                "slug": "gutenberg"
+            },
+            "options": {
+                "activate": true
+            }
+        },
+        {
+            "step": "installPlugin",
+            "pluginData": {
+                "resource": "git:directory",
+                "url": "https://github.com/akirk/autolink-text",
+                "ref": "dist/pr-3"
+            },
+            "options": {
+                "activate": true,
+                "targetFolderName": "auto-linker"
+            },
+            "progress": {
+                "caption": "Installing Autolink Text from GitHub"
+            }
+        },
+        {
+            "step": "defineWpConfigConsts",
+            "consts": {
+                "WP_ALLOW_COLLABORATION": true
+            }
+        },
+        {
+            "step": "runPHP",
+            "code": "<?php require_once '/wordpress/wp-load.php'; $data = array( 'user_login' => 'autolink-text', 'user_pass' => 'password', 'role' => 'administrator', 'display_name' => 'Autolink Text',); wp_insert_user( $data ); ?>",
+            "progress": {
+                "caption": "createUser: autolink-text"
+            }
+        },
+        {
+            "step": "setSiteOptions",
+            "options": {
+                "auto_linker_bot_user_id": "2",
+                "auto_linker_terms": [
+                    {
+                        "term": "Playground",
+                        "url": "https://playground.wordpress.net/",
+                        "color": "#3858e9",
+                        "bg_color": "#f6f7f7",
+                        "bold": true
+                    }
+                ]
+            }
+        }
+    ],
+    "$schema": "https://playground.wordpress.net/blueprint-schema.json",
+    "meta": {
+        "title": "Autolink Text",
+        "author": "https://github.com/akirk/playground-step-library"
     }
-  ],
-  "$schema": "https://playground.wordpress.net/blueprint-schema.json",
-  "meta": {
-    "title": "Autolink Text",
-    "author": "https://github.com/akirk/playground-step-library"
-  }
 }
