@@ -111,7 +111,20 @@ function auto_linker_enqueue_settings_assets( string $hook_suffix ): void {
 	wp_enqueue_script( 'wp-color-picker' );
 	wp_add_inline_style(
 		'wp-color-picker',
-		'.settings_page_autolink-text .form-table th { padding-left: 10px; }'
+		'.settings_page_autolink-text .form-table th { padding-left: 10px; }
+		.settings_page_autolink-text .wp-picker-container {
+			position: relative;
+		}
+		.settings_page_autolink-text .wp-picker-holder {
+			left: 0;
+			position: absolute;
+			top: 100%;
+			z-index: 100000;
+		}
+		.settings_page_autolink-text .wp-picker-container .iris-picker {
+			box-shadow: 0 8px 20px rgba(0, 0, 0, 0.18);
+			margin-top: 6px;
+		}'
 	);
 	wp_add_inline_script(
 		'wp-color-picker',
