@@ -1,6 +1,6 @@
 {
-	"name": "akirk/auto-linker",
-	"description": "PHP-only Gutenberg RTC automatic term linker prototype.",
+	"name": "akirk/autolink-text",
+	"description": "PHP-only Gutenberg RTC automatic term linker and styling prototype.",
 	"type": "wordpress-plugin",
 	"license": "GPL-2.0-or-later",
 	"repositories": [

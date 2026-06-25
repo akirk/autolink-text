@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "7545ff228bfb618933142546d65ae423",
+    "content-hash": "d88807264663345c06d7a1476ed1c93b",
     "packages": [
         {
             "name": "maxschmeling/y-php",
