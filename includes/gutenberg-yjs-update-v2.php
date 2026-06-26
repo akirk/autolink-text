@@ -1,5 +1,5 @@
 <?php
-namespace Auto_Linker\Gutenberg_RTC;
+namespace Autolink_Text\Gutenberg_RTC;
 
 /**
  * Gutenberg-specific helpers for Yjs updateV2 payloads.

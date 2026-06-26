@@ -7,7 +7,7 @@
  * Author: Alex Kirk
  * Text Domain: autolink-text
  *
- * @package Auto_Linker
+ * @package Autolink_Text
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -29,8 +29,8 @@ require_once __DIR__ . '/includes/autolink-text-support.php';
 add_action( 'admin_init', 'auto_linker_register_settings' );
 add_action( 'admin_menu', 'auto_linker_register_settings_page' );
 add_action( 'admin_enqueue_scripts', 'auto_linker_enqueue_settings_assets' );
-add_filter( 'rest_pre_dispatch', 'auto_linker_log_wp_sync_requests', 10, 3 );
-add_filter( 'rest_post_dispatch', 'auto_linker_respond_to_wp_sync_requests', 10, 3 );
+add_filter( 'rest_pre_dispatch', array( 'Autolink_Text_Bot', 'log_wp_sync_requests' ), 10, 3 );
+add_filter( 'rest_post_dispatch', array( 'Autolink_Text_Bot', 'respond_to_wp_sync_requests' ), 10, 3 );
 
 /*
  * This is how the bot works:
@@ -66,6 +66,11 @@ add_filter( 'rest_post_dispatch', 'auto_linker_respond_to_wp_sync_requests', 10,
  */
 
 /**
+ * Handles the Gutenberg RTC bot workflow for Autolink Text.
+ */
+final class Autolink_Text_Bot {
+
+/**
  * Logs incoming Gutenberg real-time collaboration requests before WordPress
  * handles them.
  *
@@ -76,14 +81,14 @@ add_filter( 'rest_post_dispatch', 'auto_linker_respond_to_wp_sync_requests', 10,
  * @param WP_REST_Request $request Request used to generate the response.
  * @return mixed Unchanged response.
  */
-function auto_linker_log_wp_sync_requests( $result, WP_REST_Server $server, WP_REST_Request $request ) {
+	public static function log_wp_sync_requests( $result, WP_REST_Server $server, WP_REST_Request $request ) {
 	unset( $server );
 
 	if ( '/wp-sync/v1/updates' !== $request->get_route() || 'POST' !== $request->get_method() ) {
 		return $result;
 	}
 
-	$rooms = \Auto_Linker\Gutenberg_RTC\gutenberg_rtc_get_request_rooms( $request );
+	$rooms = \Autolink_Text\Gutenberg_RTC\gutenberg_rtc_get_request_rooms( $request );
 	if ( ! is_array( $rooms ) ) {
 		auto_linker_log(
 			'wp-sync-request',
@@ -106,12 +111,12 @@ function auto_linker_log_wp_sync_requests( $result, WP_REST_Server $server, WP_R
 			'content_type' => $request->get_header( 'content-type' ),
 			'body_length'  => strlen( (string) $request->get_body() ),
 			'room_count'   => count( $rooms ),
-			'rooms'        => \Auto_Linker\Gutenberg_RTC\gutenberg_rtc_summarize_rooms( $rooms ),
+			'rooms'        => \Autolink_Text\Gutenberg_RTC\gutenberg_rtc_summarize_rooms( $rooms ),
 		)
 	);
 
 	auto_linker_maybe_emit_bot_awareness_nudges_for_rooms( $rooms );
-	\Auto_Linker\Gutenberg_RTC\gutenberg_rtc_decode_rooms_for_logging( $rooms, 'auto_linker_log' );
+	\Autolink_Text\Gutenberg_RTC\gutenberg_rtc_decode_rooms_for_logging( $rooms, 'auto_linker_log' );
 
 	return $result;
 }
@@ -127,14 +132,14 @@ function auto_linker_log_wp_sync_requests( $result, WP_REST_Server $server, WP_R
  * @param WP_REST_Request                                  $request  Request.
  * @return mixed Unchanged response.
  */
-function auto_linker_respond_to_wp_sync_requests( $response, WP_REST_Server $server, WP_REST_Request $request ) {
+	public static function respond_to_wp_sync_requests( $response, WP_REST_Server $server, WP_REST_Request $request ) {
 	unset( $server );
 
 	if ( '/wp-sync/v1/updates' !== $request->get_route() || 'POST' !== $request->get_method() ) {
 		return $response;
 	}
 
-	$rooms = \Auto_Linker\Gutenberg_RTC\gutenberg_rtc_get_request_rooms( $request );
+	$rooms = \Autolink_Text\Gutenberg_RTC\gutenberg_rtc_get_request_rooms( $request );
 	if ( ! is_array( $rooms ) ) {
 		return $response;
 	}
@@ -165,8 +170,8 @@ function auto_linker_respond_to_wp_sync_requests( $response, WP_REST_Server $ser
 			$updates
 		);
 
-		foreach ( auto_linker_ydoc_handle_room_updates( $post_id, $room, $updates_to_apply, $room_request ) as $bot_update ) {
-			$response = auto_linker_append_bot_update_to_response( $response, $room, $bot_update );
+		foreach ( self::handle_room_updates( $post_id, $room, $updates_to_apply, $room_request ) as $bot_update ) {
+			$response = self::append_bot_update_to_response( $response, $room, $bot_update );
 		}
 	}
 
@@ -183,7 +188,7 @@ function auto_linker_respond_to_wp_sync_requests( $response, WP_REST_Server $ser
  * @param array<string,mixed>            $room_request Current sync room request.
  * @return array<int,array<string,mixed>>
  */
-function auto_linker_ydoc_handle_room_updates( int $post_id, string $room, array $updates, array $room_request = array() ): array {
+	public static function handle_room_updates( int $post_id, string $room, array $updates, array $room_request = array() ): array {
 	$state = auto_linker_get_room_state( $post_id );
 	$doc   = auto_linker_ydoc_from_state( $post_id, $state );
 	if ( array() === $doc->toJSON() ) {
@@ -198,7 +203,7 @@ function auto_linker_ydoc_handle_room_updates( int $post_id, string $room, array
 	}
 
 	$bot_updates = array();
-	$bot_update  = auto_linker_ydoc_emit_first_link( $post_id, $room, $doc, $state, $room_request );
+	$bot_update  = self::emit_first_link( $post_id, $room, $doc, $state, $room_request );
 	if ( is_array( $bot_update ) ) {
 		$bot_updates[] = $bot_update;
 	}
@@ -233,7 +238,7 @@ function auto_linker_ydoc_handle_room_updates( int $post_id, string $room, array
  *
  * @return array<string,mixed>|null
  */
-function auto_linker_ydoc_emit_first_link( int $post_id, string $room, \Yjs\YDoc $doc, array &$state, array $room_request = array() ): ?array {
+	public static function emit_first_link( int $post_id, string $room, \Yjs\YDoc $doc, array &$state, array $room_request = array() ): ?array {
 	if ( ! $post_id || '' === $room ) {
 		return null;
 	}
@@ -260,7 +265,7 @@ function auto_linker_ydoc_emit_first_link( int $post_id, string $room, \Yjs\YDoc
 	}
 
 	$candidate = auto_linker_ydoc_find_awareness_link_candidate( $doc, $room_request );
-	if ( $candidate && ! auto_linker_ydoc_candidate_match( $candidate ) ) {
+	if ( $candidate && ! self::candidate_match( $candidate ) ) {
 		auto_linker_log(
 			'bot-rtc-ydoc-candidate-skip',
 			array_merge(
@@ -292,7 +297,7 @@ function auto_linker_ydoc_emit_first_link( int $post_id, string $room, \Yjs\YDoc
 	}
 
 	$text  = $candidate['text'];
-	$match = auto_linker_ydoc_candidate_match( $candidate );
+	$match = self::candidate_match( $candidate );
 	auto_linker_log(
 		'bot-rtc-ydoc-candidate',
 		array(
@@ -305,7 +310,7 @@ function auto_linker_ydoc_emit_first_link( int $post_id, string $room, \Yjs\YDoc
 		return null;
 	}
 
-	return auto_linker_ydoc_apply_link_candidate( $post_id, $room, $doc, $bot_user, $candidate, $state );
+	return self::apply_link_candidate( $post_id, $room, $doc, $bot_user, $candidate, $state );
 }
 
 /**
@@ -314,7 +319,7 @@ function auto_linker_ydoc_emit_first_link( int $post_id, string $room, \Yjs\YDoc
  * @param array{text:string,path?:string,match_mode?:string} $candidate Candidate metadata.
  * @return array{term:string,url:string,color:string,bg_color:string,bold:bool,matched_text:string,start:int,length:int,replacement:string,opening_text:string,closing_text:string}|null
  */
-function auto_linker_ydoc_candidate_match( array $candidate ): ?array {
+	public static function candidate_match( array $candidate ): ?array {
 	$text       = (string) ( $candidate['text'] ?? '' );
 	$match_mode = (string) ( $candidate['match_mode'] ?? '' );
 	if ( '' === $match_mode && str_contains( $text, '<!-- wp:' ) && str_contains( $text, '<p' ) ) {
@@ -322,8 +327,156 @@ function auto_linker_ydoc_candidate_match( array $candidate ): ?array {
 	}
 
 	return 'serialized_paragraph_html' === $match_mode
-		? auto_linker_find_first_serialized_paragraph_term( $text, auto_linker_get_terms() )
-		: auto_linker_find_first_unlinked_term( $text, auto_linker_get_terms() );
+		? self::find_first_serialized_paragraph_term( $text, auto_linker_get_terms() )
+		: self::find_first_unlinked_term( $text, auto_linker_get_terms() );
+}
+
+/**
+ * Finds the first configured term that is not already inside markup.
+ *
+ * @param array<int,array{term:string,url:string,color?:string,bg_color?:string,bold?:bool}> $terms Terms.
+ * @return array{term:string,url:string,color:string,bg_color:string,bold:bool,matched_text:string,start:int,length:int,replacement:string,opening_text:string,closing_text:string}|null
+ */
+	public static function find_first_unlinked_term( string $text, array $terms ): ?array {
+	if ( ! self::has_balanced_anchor_markup( $text ) ) {
+		return null;
+	}
+
+	foreach ( $terms as $term ) {
+		$label = (string) ( $term['term'] ?? '' );
+		$url   = (string) ( $term['url'] ?? '' );
+		$color = auto_linker_sanitize_link_color( (string) ( $term['color'] ?? '' ) );
+		$bg_color = auto_linker_sanitize_link_color( (string) ( $term['bg_color'] ?? '' ) );
+		$bold  = ! empty( $term['bold'] );
+		if ( '' === $label || '' === $url ) {
+			continue;
+		}
+
+		$pattern = '/(?<![\p{L}\p{N}_])(' . preg_quote( $label, '/' ) . ')(?=[^\p{L}\p{N}_])/iu';
+		if ( ! preg_match_all( $pattern, $text, $matches, PREG_OFFSET_CAPTURE ) ) {
+			continue;
+		}
+
+		foreach ( $matches[1] as $match ) {
+			$matched_text = (string) $match[0];
+			$byte_offset  = (int) $match[1];
+			if ( self::offset_is_inside_markup( $text, $byte_offset ) ) {
+				continue;
+			}
+
+			return array(
+				'term'         => $label,
+				'url'          => $url,
+				'color'        => $color,
+				'bg_color'     => $bg_color,
+				'bold'         => $bold,
+				'matched_text' => $matched_text,
+				'start'        => \Autolink_Text\Gutenberg_RTC\gutenberg_yjs_utf16_clock_len( substr( $text, 0, $byte_offset ) ),
+				'length'       => \Autolink_Text\Gutenberg_RTC\gutenberg_yjs_utf16_clock_len( $matched_text ),
+				'replacement'  => self::build_anchor_html( $matched_text, $url, $color, $bg_color, $bold ),
+				'opening_text' => self::build_opening_anchor_html( $url, $color, $bg_color, $bold ),
+				'closing_text' => '</a>',
+			);
+		}
+	}
+
+	return null;
+}
+
+/**
+ * Finds a configured term inside serialized paragraph HTML.
+ *
+ * @param array<int,array{term:string,url:string,color?:string,bg_color?:string,bold?:bool}> $terms Terms.
+ * @return array{term:string,url:string,color:string,bg_color:string,bold:bool,matched_text:string,start:int,length:int,replacement:string,opening_text:string,closing_text:string}|null
+ */
+	public static function find_first_serialized_paragraph_term( string $text, array $terms ): ?array {
+	if ( ! preg_match_all( '/<p\b[^>]*>(.*?)<\/p>/is', $text, $paragraphs, PREG_OFFSET_CAPTURE ) ) {
+		return null;
+	}
+
+	foreach ( $paragraphs[1] as $paragraph ) {
+		$inner_html        = (string) $paragraph[0];
+		$inner_byte_offset = (int) $paragraph[1];
+		$match             = self::find_first_unlinked_term( $inner_html, $terms );
+		if ( ! $match ) {
+			continue;
+		}
+
+		$match['start'] += \Autolink_Text\Gutenberg_RTC\gutenberg_yjs_utf16_clock_len( substr( $text, 0, $inner_byte_offset ) );
+
+		return $match;
+	}
+
+	return null;
+}
+
+/**
+ * Checks whether reconstructed text has balanced anchor tags.
+ */
+	public static function has_balanced_anchor_markup( string $text ): bool {
+	return substr_count( strtolower( $text ), '<a ' ) === substr_count( strtolower( $text ), '</a>' );
+}
+
+/**
+ * Checks whether a byte offset is inside an HTML tag or anchor.
+ */
+	public static function offset_is_inside_markup( string $text, int $byte_offset ): bool {
+	$before     = substr( $text, 0, $byte_offset );
+	$last_open  = strrpos( $before, '<' );
+	$last_close = strrpos( $before, '>' );
+	if ( false !== $last_open && ( false === $last_close || $last_open > $last_close ) ) {
+		return true;
+	}
+
+	$lower              = strtolower( $before );
+	$last_anchor_open   = strrpos( $lower, '<a ' );
+	$last_empty_anchor  = strrpos( $lower, '<a>' );
+	$last_anchor_close  = strrpos( $lower, '</a>' );
+	$last_anchor_offset = max(
+		false === $last_anchor_open ? -1 : $last_anchor_open,
+		false === $last_empty_anchor ? -1 : $last_empty_anchor
+	);
+
+	return $last_anchor_offset > ( false === $last_anchor_close ? -1 : $last_anchor_close );
+}
+
+/**
+ * Builds the anchor markup inserted into paragraph content.
+ */
+	public static function build_anchor_html( string $label, string $url, string $color = '', string $bg_color = '', bool $bold = false ): string {
+	return self::build_opening_anchor_html( $url, $color, $bg_color, $bold ) . esc_html( $label ) . '</a>';
+}
+
+/**
+ * Builds the opening anchor tag inserted before linked text.
+ */
+	public static function build_opening_anchor_html( string $url, string $color = '', string $bg_color = '', bool $bold = false ): string {
+	$style = self::build_link_style( $color, $bg_color, $bold );
+
+	return '<a href="' . esc_url( $url ) . '"' . ( '' === $style ? '' : ' style="' . esc_attr( $style ) . '"' ) . '>';
+}
+
+/**
+ * Builds a constrained inline style string for generated links.
+ */
+	public static function build_link_style( string $color, string $bg_color, bool $bold ): string {
+	$styles   = array();
+	$color    = auto_linker_sanitize_link_color( $color );
+	$bg_color = auto_linker_sanitize_link_color( $bg_color );
+
+	if ( '' !== $color ) {
+		$styles[] = 'color: ' . $color . ';';
+	}
+
+	if ( '' !== $bg_color ) {
+		$styles[] = 'background-color: ' . $bg_color . ';';
+	}
+
+	if ( $bold ) {
+		$styles[] = 'font-weight: 700;';
+	}
+
+	return implode( ' ', $styles );
 }
 
 /**
@@ -335,10 +488,10 @@ function auto_linker_ydoc_candidate_match( array $candidate ): ?array {
  * @param array{text_type:\Yjs\YNestedText,text:string,path:string,match_mode?:string} $candidate Link candidate.
  * @return array<string,mixed>|null
  */
-function auto_linker_ydoc_apply_link_candidate( int $post_id, string $room, \Yjs\YDoc $doc, WP_User $bot_user, array $candidate, array &$state ): ?array {
+	public static function apply_link_candidate( int $post_id, string $room, \Yjs\YDoc $doc, WP_User $bot_user, array $candidate, array &$state ): ?array {
 	$text  = $candidate['text_type']->toString();
 	$candidate['text'] = $text;
-	$match = auto_linker_ydoc_candidate_match( $candidate );
+	$match = self::candidate_match( $candidate );
 	if ( ! $match ) {
 		auto_linker_log(
 			'bot-rtc-ydoc-link',
@@ -460,7 +613,7 @@ function auto_linker_ydoc_apply_link_candidate( int $post_id, string $room, \Yjs
  * @param array<string, mixed>                             $bot_update Bot update metadata.
  * @return WP_REST_Response|WP_HTTP_Response|WP_Error|mixed
  */
-function auto_linker_append_bot_update_to_response( $response, string $room, array $bot_update ) {
+	public static function append_bot_update_to_response( $response, string $room, array $bot_update ) {
 	if ( ! $response instanceof WP_REST_Response || empty( $bot_update['update_data'] ) ) {
 		return $response;
 	}
@@ -499,4 +652,130 @@ function auto_linker_append_bot_update_to_response( $response, string $room, arr
 
 	$response->set_data( $data );
 	return $response;
+}
+
+}
+
+/**
+ * Back-compat wrapper for the REST pre-dispatch hook callback.
+ *
+ * @return mixed
+ */
+function auto_linker_log_wp_sync_requests( $result, WP_REST_Server $server, WP_REST_Request $request ) {
+	return Autolink_Text_Bot::log_wp_sync_requests( $result, $server, $request );
+}
+
+/**
+ * Back-compat wrapper for the REST post-dispatch hook callback.
+ *
+ * @return mixed
+ */
+function auto_linker_respond_to_wp_sync_requests( $response, WP_REST_Server $server, WP_REST_Request $request ) {
+	return Autolink_Text_Bot::respond_to_wp_sync_requests( $response, $server, $request );
+}
+
+/**
+ * Back-compat wrapper for YDoc room update handling.
+ *
+ * @param array<int,array<string,mixed>> $updates      Incoming sync updates.
+ * @param array<string,mixed>            $room_request Current sync room request.
+ * @return array<int,array<string,mixed>>
+ */
+function auto_linker_ydoc_handle_room_updates( int $post_id, string $room, array $updates, array $room_request = array() ): array {
+	return Autolink_Text_Bot::handle_room_updates( $post_id, $room, $updates, $room_request );
+}
+
+/**
+ * Back-compat wrapper for YDoc link emission.
+ *
+ * @return array<string,mixed>|null
+ */
+function auto_linker_ydoc_emit_first_link( int $post_id, string $room, \Yjs\YDoc $doc, array &$state, array $room_request = array() ): ?array {
+	return Autolink_Text_Bot::emit_first_link( $post_id, $room, $doc, $state, $room_request );
+}
+
+/**
+ * Back-compat wrapper for candidate matching.
+ *
+ * @param array{text:string,path?:string,match_mode?:string} $candidate Candidate metadata.
+ * @return array{term:string,url:string,color:string,bg_color:string,bold:bool,matched_text:string,start:int,length:int,replacement:string,opening_text:string,closing_text:string}|null
+ */
+function auto_linker_ydoc_candidate_match( array $candidate ): ?array {
+	return Autolink_Text_Bot::candidate_match( $candidate );
+}
+
+/**
+ * Back-compat wrapper for term matching.
+ *
+ * @param array<int,array{term:string,url:string,color?:string,bg_color?:string,bold?:bool}> $terms Terms.
+ * @return array{term:string,url:string,color:string,bg_color:string,bold:bool,matched_text:string,start:int,length:int,replacement:string,opening_text:string,closing_text:string}|null
+ */
+function auto_linker_find_first_unlinked_term( string $text, array $terms ): ?array {
+	return Autolink_Text_Bot::find_first_unlinked_term( $text, $terms );
+}
+
+/**
+ * Back-compat wrapper for serialized paragraph term matching.
+ *
+ * @param array<int,array{term:string,url:string,color?:string,bg_color?:string,bold?:bool}> $terms Terms.
+ * @return array{term:string,url:string,color:string,bg_color:string,bold:bool,matched_text:string,start:int,length:int,replacement:string,opening_text:string,closing_text:string}|null
+ */
+function auto_linker_find_first_serialized_paragraph_term( string $text, array $terms ): ?array {
+	return Autolink_Text_Bot::find_first_serialized_paragraph_term( $text, $terms );
+}
+
+/**
+ * Back-compat wrapper for anchor balance checks.
+ */
+function auto_linker_has_balanced_anchor_markup( string $text ): bool {
+	return Autolink_Text_Bot::has_balanced_anchor_markup( $text );
+}
+
+/**
+ * Back-compat wrapper for markup offset checks.
+ */
+function auto_linker_offset_is_inside_markup( string $text, int $byte_offset ): bool {
+	return Autolink_Text_Bot::offset_is_inside_markup( $text, $byte_offset );
+}
+
+/**
+ * Back-compat wrapper for generated anchor markup.
+ */
+function auto_linker_build_anchor_html( string $label, string $url, string $color = '', string $bg_color = '', bool $bold = false ): string {
+	return Autolink_Text_Bot::build_anchor_html( $label, $url, $color, $bg_color, $bold );
+}
+
+/**
+ * Back-compat wrapper for generated opening anchor markup.
+ */
+function auto_linker_build_opening_anchor_html( string $url, string $color = '', string $bg_color = '', bool $bold = false ): string {
+	return Autolink_Text_Bot::build_opening_anchor_html( $url, $color, $bg_color, $bold );
+}
+
+/**
+ * Back-compat wrapper for generated link styles.
+ */
+function auto_linker_build_link_style( string $color, string $bg_color, bool $bold ): string {
+	return Autolink_Text_Bot::build_link_style( $color, $bg_color, $bold );
+}
+
+/**
+ * Back-compat wrapper for applying a YDoc link candidate.
+ *
+ * @param array{text_type:\Yjs\YNestedText,text:string,path:string,match_mode?:string} $candidate Link candidate.
+ * @return array<string,mixed>|null
+ */
+function auto_linker_ydoc_apply_link_candidate( int $post_id, string $room, \Yjs\YDoc $doc, WP_User $bot_user, array $candidate, array &$state ): ?array {
+	return Autolink_Text_Bot::apply_link_candidate( $post_id, $room, $doc, $bot_user, $candidate, $state );
+}
+
+/**
+ * Back-compat wrapper for appending bot updates.
+ *
+ * @param WP_REST_Response|WP_HTTP_Response|WP_Error|mixed $response Response.
+ * @param array<string, mixed>                             $bot_update Bot update metadata.
+ * @return WP_REST_Response|WP_HTTP_Response|WP_Error|mixed
+ */
+function auto_linker_append_bot_update_to_response( $response, string $room, array $bot_update ) {
+	return Autolink_Text_Bot::append_bot_update_to_response( $response, $room, $bot_update );
 }
